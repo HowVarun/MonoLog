@@ -1,0 +1,74 @@
+vault_map = {
+   
+    "/documents/financials/taxes_2026.pdf": {
+        "is_active": True,           # If False, this is an old version (Ghost file)
+        "created_at": 1714470000,    # Unix timestamp
+        "total_size": 1500000,       # Total size in bytes
+        
+        "chunks": [
+            {
+                "iv": b'\x12\xaf\x33...', 
+                "start": 60,              
+                "end": 1048652            
+            },
+            {
+                "iv": b'\x99\xbb\xcc...', 
+                "start": 1048652,
+                "end": 1500016            
+            }
+        ]
+    },
+    
+    "/photos/vacation.jpg": {
+        # ... identical structure for the next file
+    }
+}
+
+
+CREATE TABLE files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename TEXT NOT NULL,          -- e.g., "taxes_2026.pdf"
+    parent_folder TEXT NOT NULL,     -- e.g., "/documents/financials/"
+    full_path TEXT UNIQUE NOT NULL,  -- e.g., "/documents/financials/taxes_2026.pdf"
+    size_bytes INTEGER,              -- e.g., 1500000
+    created_at INTEGER,              -- e.g., 1714470000
+    is_deleted BOOLEAN DEFAULT 0     -- For the UI's "Recycle Bin" feature
+);
+
+
+
+
+SecureVault/
+├── .gitignore                   # Prevents uploading vaults/keys [cite: 125]
+├── README.md                    # Project proposal [cite: 126]
+├── requirements.txt             # cryptography, msgpack, liboqs-python [cite: 127]
+├── main.py                      # The Entry Point (CLI or GUI) [cite: 152]
+└── modules/
+    ├── __init__.py              
+    ├── vault_map.py             # MsgPack Hash Table & SQLite indexer [cite: 134]
+    ├── vault_io.py              # 21-Byte Header, Append-Only logic, Atomic Writes [cite: 136]
+    ├── crypto_core/             # The Math Engine Sub-Package
+    │   ├── __init__.py          
+    │   ├── kdf.py               # Argon2id Key Factory [cite: 132]
+    │   └── engine.py            # AesGcm ABC Wrappers [cite: 132]
+    ├── system/                  # OS-Level Interactions [cite: 138]
+    │   ├── __init__.py          [cite: 139]
+    │   ├── ghost_fs.py          # Secure tempfile extraction & shredding [cite: 141]
+    │   ├── scrubber.py          # Multiprocessing tag verification [cite: 143]
+    │   └── defragmentor.py      # Left-shift defragmentation [cite: 145]
+    └── network/                 # Post-Quantum P2P Syncing [cite: 147]
+        ├── __init__.py          [cite: 148]
+        └── pq_sync.py           # Sockets and CRYSTALS-Kyber wrapper [cite: 150]
+
+
+SecureVault/
+├── .gitignore
+├── requirements.txt
+├── main_ui.py                   <-- Phase 7: The GUI and main loop
+└── modules/
+    ├── __init__.py              
+    ├── vault_map.py             
+    ├── vault_io.py              
+    ├── crypto_core/             
+    ├── system/                  
+    └── network/
