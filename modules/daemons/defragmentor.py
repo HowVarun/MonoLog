@@ -38,7 +38,7 @@ class Defragmentation:
         return (virtual_path, iv, chunk_ct)
 
     def sync_map_to_disc(self, new_map_dict: dict):
-        local_aesgcm = AesGcm(self.orchestrator.hash)
+        local_aesgcm = AesGcm(self.orchestrator.dek)
         
        
         temp_hashmap = VaultMap()
@@ -57,7 +57,7 @@ class Defragmentation:
         iv_identifier, identifier_ct = local_aesgcm.encrypt_cipherstream(identifier_pt)
 
         with open(self.tmp_path, 'r+b') as tmp_file:
-            tmp_file.seek(23)
+            tmp_file.seek(83)
             tmp_file.write(iv_identifier+ identifier_ct)
             os.fsync(tmp_file.fileno())
 
@@ -72,7 +72,7 @@ class Defragmentation:
                 new_map_dict = {vpath: [] for vpath in active_files}
 
                 with open(self.tmp_path, 'wb') as wfile, open(self.orchestrator.filepath, 'rb') as rfile:
-                    data = rfile.read(67)
+                    data = rfile.read(127)
                     wfile.write(data)
 
                 with concurrent.futures.ThreadPoolExecutor() as executor:

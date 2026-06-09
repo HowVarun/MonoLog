@@ -12,6 +12,9 @@ Vaults/
 # Ignore Database files (Optional, but usually a good idea)
 *.db
 
+# Ignore Guidebooks
+Guidebooks/
+
 # Ignore Python Cache
 __pycache__/
 *.pyc

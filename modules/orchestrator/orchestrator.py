@@ -32,31 +32,44 @@ class VaultManager:
     def create_new_vault(self, master_pass, weak_pass):
         if os.path.exists(self.filepath):
             raise FileExistsError("File already exists!")
+        #==================================
         salt = os.urandom(16)
         kdf = MfaKdf(existing_salt = salt)
-        self.hash = bytearray(kdf.derive(master_pass, weak_pass))
-        local_aesgcm = AesGcm(self.hash)
+        self.kek_hash = bytearray(kdf.derive(master_pass, weak_pass))
+        #==================================
+        self.dek = bytearray(os.urandom(32))
+        dek_aesgcm = AesGcm(self.kek_hash)
+        dek_iv, encrypted_dek = dek_aesgcm.encrypt_cipherstream(self.dek)
+        #==================================
+        local_aesgcm = AesGcm(self.dek)
         map_identifier_iv = os.urandom(12)
-        P, L = 67, 0
+        P, L = 127, 0
         map_identifier_pt = struct.pack('>QQ', P, L)
         _, map_identifier_ct = local_aesgcm.encrypt_cipherstream(map_identifier_pt, map_identifier_iv)
-        self.vaultio.initialize_new_vault("1.0.0", salt, map_identifier_iv, map_identifier_ct)
+        #==================================
+        self.vaultio.initialize_new_vault("1.0.0", salt, dek_iv, encrypted_dek, map_identifier_iv, map_identifier_ct)
         salt, map_identifier_iv, map_identifier_ct = b"", b"", b""
         self.hashmap = VaultMap()
         self.vaultdb = VaultDatabase()
+        #==================================
 
 
     def unlock_hash(self, master_password, weak_password):
         self.check, self.major, self.minor, self.patch, self.salt = self.vaultio.read_header()
+        #==================================
         kdf = MfaKdf(existing_salt = self.salt)
-        self.hash = bytearray(kdf.derive(master_password, weak_password))
+        self.kek_hash = bytearray(kdf.derive(master_password, weak_password))
+        #==================================
+        dek_iv, encrypted_dek = self.vaultio.read_lockbox()
+        dek_aesgcm = AesGcm(self.kek_hash)
+        self.dek = bytearray(dek_aesgcm.decrypt_cipherstream(dek_iv, encrypted_dek))
 
 
     def boot_vault(self):
         if not os.path.exists(self.filepath):
             raise FileNotFoundError("Vault does not exist!")
         
-        local_aesgcm = AesGcm(self.hash)
+        local_aesgcm = AesGcm(self.dek)
         iv_identifier, identifier_ct = self.vaultio.read_pointer()
         identifier_pt = local_aesgcm.decrypt_cipherstream(iv_identifier, identifier_ct)
         P, L = struct.unpack(">QQ", identifier_pt)
@@ -92,9 +105,13 @@ class VaultManager:
                         os.remove(self.lock_filepath)
                     except OSError:
                         pass
-            if hasattr(self, 'hash') and self.hash:
-                self.hash[:] = b'\x00' * len(self.hash)
-                del self.hash
+            if hasattr(self, 'kek_hash') and self.kek_hash:
+                self.kek_hash[:] = b'\x00' * len(self.kek_hash)
+                del self.kek_hash
+                
+            if hasattr(self, 'dek') and self.dek:
+                self.dek[:] = b'\x00' * len(self.dek)
+                del self.dek
 
     #Category 2 : Ingestion
 
@@ -108,7 +125,7 @@ class VaultManager:
     def _worker_encrypt(self, chunked_coordinates : tuple):
         chunk_io = 2*1024*1024
         filepath, offset, size = chunked_coordinates
-        local_aesgcm = AesGcm(self.hash)
+        local_aesgcm = AesGcm(self.dek)
         with open(filepath, 'rb') as f:
             f.seek(offset)
             pt_chunk = f.read(size)
@@ -117,7 +134,7 @@ class VaultManager:
     
     def sync_map_to_disc(self):
         with self.io_lock:
-            local_aesgcm = AesGcm(self.hash)
+            local_aesgcm = AesGcm(self.dek)
             nmap = self.vaultdb.get_complete_meta()
             nmap_pt = self.hashmap.restitch(nmap)
             nmap_iv, nmap_ciphertext = local_aesgcm.encrypt_cipherstream(nmap_pt)
@@ -161,7 +178,7 @@ class VaultManager:
     def _worker_decrypt(self, chunk_dict : dict):
         #This worker recieves one input dictionary we decrypt one chunk
         #{iv : 12bytes, start: int, end : int}
-        local_aesgcm = AesGcm(self.hash)
+        local_aesgcm = AesGcm(self.dek)
         iv = chunk_dict.get('iv') 
         start = chunk_dict.get('start')
         end = chunk_dict.get('end')
