@@ -15,6 +15,10 @@ Vaults/
 # Ignore Guidebooks
 Guidebooks/
 
+#Ignore dev module for pqc
+dev/
+
+
 # Ignore Python Cache
 __pycache__/
 *.pyc
