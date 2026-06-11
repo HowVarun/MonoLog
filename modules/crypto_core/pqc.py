@@ -50,11 +50,9 @@ class MLKEM:
         self.pvt_key = None
         
         if secret_key:
-            # Load the engine with the provided secret key
             self.keyencapsulation = KeyEncapsulation(self.algorithm, secret_key)
             self.has_key = True
         else:
-            # Prepare an empty engine for generation later
             self.keyencapsulation = KeyEncapsulation(self.algorithm)
         
     def generate_key(self):
