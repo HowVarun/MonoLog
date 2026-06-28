@@ -56,10 +56,7 @@ class Defragmentation:
         identifier_pt = struct.pack('>QQ', nmap_P, nmap_L)
         iv_identifier, identifier_ct = local_aesgcm.encrypt_cipherstream(identifier_pt)
 
-        with open(self.tmp_path, 'r+b') as tmp_file:
-            tmp_file.seek(83)
-            tmp_file.write(iv_identifier+ identifier_ct)
-            os.fsync(tmp_file.fileno())
+        self.vaultiot.write_pointer(iv_identifier, identifier_ct)
 
     def vacuum(self):
         if self.is_running:

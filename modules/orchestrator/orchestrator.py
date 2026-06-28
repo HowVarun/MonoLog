@@ -19,9 +19,11 @@ class VaultManager:
         self.lock_filepath = self.filepath + ".lock"
         self.os_lock_handle = open(self.lock_filepath, 'w')
         try:
-            portalocker.lock(self.os_lock_handle, portalocker.LOCK_EX | portalocker.LOCK_NB)
+            portalocker.lock(self.os_lock_handle, portalocker.LOCK_EX | portalocker.LOCK_NB) #<--------------- portalocker
+            
             self.os_lock_handle.write("Your Vault is locked by Secure Vault")
             self.os_lock_handle.flush()
+
         except portalocker.exceptions.LockException:
             self.os_lock_handle.close()
             raise PermissionError("This vault is already open in another process")

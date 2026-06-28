@@ -1,3 +1,6 @@
 from .ghostfile import GhostFileIO
 from .vaultio import VaultIO
-from .network import SecureNetworkTransport
+from .networktrans import SecureNetworkTransport
+from .keyring_pass import PrivateKeyManager
+from .trusted_devices import TrustedDevicesDatabase
+from .opcodes import Opcodes

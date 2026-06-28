@@ -13,12 +13,12 @@ class MLDSA:
     
     def generate_key(self):
         if not self.has_key:
-            pub_key = self.signature.generate_keypair()
-            _pvt_key = self.signature.export_secret_key()
+            pub_key = bytearray(self.signature.generate_keypair())
+            _pvt_key = bytearray(self.signature.export_secret_key())
             self.has_key = True
         else:
-            _pvt_key = self.signature.export_secret_key()
-            pub_key = _pvt_key[-2592:]
+            _pvt_key = bytearray(self.signature.export_secret_key())
+            pub_key = bytearray(_pvt_key[-2592:])
 
         return pub_key, _pvt_key
     
@@ -50,11 +50,9 @@ class MLKEM:
         self.pvt_key = None
         
         if secret_key:
-            # Load the engine with the provided secret key
             self.keyencapsulation = KeyEncapsulation(self.algorithm, secret_key)
             self.has_key = True
         else:
-            # Prepare an empty engine for generation later
             self.keyencapsulation = KeyEncapsulation(self.algorithm)
         
     def generate_key(self):
@@ -98,7 +96,3 @@ class MLKEM:
     
     def __del__(self):
         self.close()
-
-
-        
-        

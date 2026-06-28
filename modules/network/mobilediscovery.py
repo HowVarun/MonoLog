@@ -2,7 +2,7 @@ import qrcode
 import hashlib
 import socket
 
-class MobileQRAnchor:
+class MobileQRDiscovery:
     def __init__(self, port=65432):
         self.port = port
         self.header = "SecureVault_V1.1"
