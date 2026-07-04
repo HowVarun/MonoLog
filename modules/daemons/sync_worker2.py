@@ -10,7 +10,7 @@ import time
 
 from modules.system import SecureNetworkTransport, PrivateKeyManager, TrustedDevicesDatabase, Opcodes
 from modules.network import DesktopDiscover
-from modules.crypto_core import hashing, saspass
+from modules.crypto_core import hashing, SasPass
 
 class SecurityError(Exception):
     pass
@@ -338,7 +338,7 @@ class SyncWorker:
                 transport.send_message(Opcodes.ID_ERR)
                 raise SecurityError("Malformed Metadata payload JSON")
 
-            PIN = saspass.derive_pass(peer_key, self_key)
+            PIN = SasPass.derive_pass(peer_key, self_key)
             print(f"\n======================================")
             print(f"     SECUREVAULT PAIRING PIN          ")
             print(f"     PIN: {PIN}                       ")

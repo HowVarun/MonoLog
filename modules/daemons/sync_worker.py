@@ -10,7 +10,7 @@ import time
 
 from modules.system import SecureNetworkTransport, PrivateKeyManager, TrustedDevicesDatabase, Opcodes
 from modules.network import PQCHandshake, DesktopDiscover
-from modules.crypto_core import hashing, saspass
+from modules.crypto_core import hashing, SasPass
 
 class SecurityError(Exception):
     pass
@@ -296,7 +296,7 @@ class SyncWorker:
                 if state == state3:
                     sas_pin = int(input()) #Might need to input from some other way for now placeholder
                     transport.send_message(Opcodes.AUTH_INT)
-                    if saspass.verify_pass(sas_pin, peer_hash, self_key):
+                    if SasPass.verify_pass(sas_pin, peer_hash, self_key):
                         transport.send_message(Opcodes.AUTH_PASS)
                         self.peers.add_trusted_device(peer_hash, peer_devc_meta, peer_devc_meta, peer_key)
                         #send to syncing here
@@ -345,7 +345,7 @@ class SyncWorker:
                     raise SecurityError("Did not receive Authenticaiton")
                 
                 if state == state3:
-                    PIN = saspass.derive_pass(peer_key, self_key)
+                    PIN = SasPass.derive_pass(peer_key, self_key)
                     print(PIN)
                     opcode2, _ = transport.receive_message()
                     if opcode2 == Opcodes.AUTH_PASS:
@@ -361,7 +361,7 @@ class SyncWorker:
             transport.close_connection()
 
     def _execute_sync_server(self, transport : SecureNetworkTransport, peer_hash : bytes):
-        
+        pass
 
                 
 
