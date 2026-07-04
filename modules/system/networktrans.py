@@ -25,7 +25,7 @@ class SecureNetworkTransport:
             print(f"[{Opcodes.ERR_NET.decode('utf-8')}] Transport failed to send message: {e}")
             raise ConnectionError()
 
-    def receive_message(self, timeout: float = None) -> tuple[bytes, bytes]:
+    def receive_message(self, timeout: float = 5.0) -> tuple[bytes, bytes]:
         if timeout:
             self.sock.settimeout(timeout)
             

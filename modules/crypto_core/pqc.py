@@ -11,7 +11,7 @@ class MLDSA:
             self.signature = Signature(self.algorithm, secret_key)
             self.has_key = True
     
-    def generate_key(self):
+    def generate_key(self, type : str):
         if not self.has_key:
             pub_key = bytearray(self.signature.generate_keypair())
             _pvt_key = bytearray(self.signature.export_secret_key())
@@ -20,7 +20,14 @@ class MLDSA:
             _pvt_key = bytearray(self.signature.export_secret_key())
             pub_key = bytearray(_pvt_key[-2592:])
 
-        return pub_key, _pvt_key
+        if type == "pub":
+            _pvt_key[:] = b'\x00' * len(_pvt_key)
+            return pub_key
+        elif type == "pvt":
+            pub_key[:] = b'\x00' * len(pub_key)
+            return _pvt_key
+        else:
+            raise ValueError("Did not receive valid type")
     
     def sign(self, message: bytes):
         if not self.has_key:
@@ -55,7 +62,7 @@ class MLKEM:
         else:
             self.keyencapsulation = KeyEncapsulation(self.algorithm)
         
-    def generate_key(self):
+    def generate_key(self, type : str):
         """
         MANDATORY FIRST STEP:
         Populates self.pvt_key and self.pub_key whether starting fresh or from an existing key.
@@ -68,7 +75,12 @@ class MLKEM:
             self.pvt_key = self.keyencapsulation.export_secret_key()
             self.pub_key = self.pvt_key[-1568:]
         
-        return self.pvt_key, self.pub_key
+        if type == "pub":
+            return self.pub_key
+        elif type == "pvt":
+            return self.pvt_key
+        else:
+            raise ValueError("Did not receive valid type")
 
     def encapsulate(self, peer_public_key: bytes):
         try:

@@ -6,10 +6,11 @@ import tempfile
 import platform
 import threading
 import json
+import time
 
 from modules.system import SecureNetworkTransport, PrivateKeyManager, TrustedDevicesDatabase, Opcodes
 from modules.network import PQCHandshake, DesktopDiscover
-from modules.crypto_core import hashing
+from modules.crypto_core import hashing, saspass
 
 class SecurityError(Exception):
     pass
@@ -26,7 +27,6 @@ class SyncWorker:
         
         #network classes
         self.discovery = DesktopDiscover()
-        self.handshake = PQCHandshake(port=self.port)
         
         #device info
         self.local_name, self.local_type = self.get_device_identity()
@@ -104,7 +104,7 @@ class SyncWorker:
         transport.send_message(Opcodes.ACQ_OK)
     
     def _verify_sent(self, transport : SecureNetworkTransport):
-        opcode, _ = transport.receive_message(timeout = 5.0)
+        opcode, _ = transport.receive_message()
         if opcode == Opcodes.ACQ_OK:
             return True
         else:
@@ -119,7 +119,7 @@ class SyncWorker:
             self.peers.create_db()
             identity = self.pvt_key_mgr.get_or_create_identity()
             _, dsa_pub_key = identity.generate_key()
-            _[:] = [0]*len(_) #deleting pvt_key 
+            _[:] = b'\x00' * len(_) #deleting pvt_key 
             self.discovery.broadcast_presence(dsa_pub_key)
 
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -154,7 +154,7 @@ class SyncWorker:
 
     def _inbound_router(self, transport : SecureNetworkTransport):
 
-        opcode_received, peer_hash = transport.receive_message(timeout = 5.0)
+        opcode_received, peer_hash = transport.receive_message()
 
         #==============PROTOCOL ROUTING===============
         if opcode_received == Opcodes.TRUST_QRY:
@@ -175,7 +175,7 @@ class SyncWorker:
                 #send to pairing HERE
             elif peer_data:
                 transport.send_message(Opcodes.TRUST_YES)
-                recv_op, _ = transport.receive_message(timeout = 5.0)
+                recv_op, _ = transport.receive_message()
                 if recv_op == Opcodes.DEVC_RM:
                     self.peers.remove_peer(peer_hash)
                     transport.send_message(Opcodes.TRUST_RM)
@@ -193,12 +193,12 @@ class SyncWorker:
         transport = SecureNetworkTransport(sock=client_sock)
         
         try:
-            ping_bytes = self._opcode_check(transport.receive_message(timeout=5.0), Opcodes.PING, transport)
+            ping_bytes = self._opcode_check(transport.receive_message(), Opcodes.PING, transport)
             transport.send_message(Opcodes.PONG, ping_bytes)
             self._inbound_router(transport)
 
             # _, pub_key = self.my_identity.generate_key()
-            # _[:] = 0 * len(_)
+            # _[:] = b'\x00' * len(_) 
             # pub_hash = hashing.hash_key(pub_key)
             # transport.send_message(Opcodes.DSA_HASH, pub_hash)  <- Use these methods inside pairing and syncing
         except Exception as e:
@@ -209,7 +209,7 @@ class SyncWorker:
 
     def _outbound_router(self, transport : SecureNetworkTransport, expected_mdns_hash : bytes):
         _, pub_key = self.my_identity.generate_key()
-        _[:] = 0 * len(_)
+        _[:] = b'\x00' * len(_)
         pub_hash = hashing.hash_key(pub_key)
         
         is_known = self.peers.is_device_trusted(expected_mdns_hash)
@@ -217,7 +217,7 @@ class SyncWorker:
         #==========Routing Protocol=======================
         if is_known:
             transport.send_message(Opcodes.TRUST_QRY, pub_hash)
-            opcode, _ = transport.receive_message(timeout = 5.0)
+            opcode, _ = transport.receive_message()
             if opcode == Opcodes.TRUST_YES:
                 pass
                 #Send to syncing
@@ -229,12 +229,12 @@ class SyncWorker:
                 raise SecurityError("Invalid opcode at current stage")
         else:
             transport.send_message(Opcodes.DSA_HASH, pub_hash)
-            opcode, _ = transport.receive_message(timeout = 5.0)
+            opcode, _ = transport.receive_message()
             if opcode == Opcodes.TRUST_NO:
                 pass #send to pairing
             elif opcode == Opcodes.TRUST_YES:
                 transport.send_message(Opcodes.DEVC_RM)
-                opcode, _ = transport.receive_message(timeout = 5.0)
+                opcode, _ = transport.receive_message()
                 if opcode == Opcodes.TRUST_RM:
                     pass # send to pairing
                 else:
@@ -252,7 +252,7 @@ class SyncWorker:
 
             rand_byte = os.urandom(8)
             transport.send_message(Opcodes.PING, rand_byte)
-            rcvd_byte = self._opcode_check(transport.receive_message(timeout = 5.0), Opcodes.PONG, transport)
+            rcvd_byte = self._opcode_check(transport.receive_message(), Opcodes.PONG, transport)
             if rcvd_byte != rand_byte:
                 raise SecurityError("Device transport functionality compromised")
             
@@ -264,26 +264,107 @@ class SyncWorker:
 
     #===========================================================================================================================
     
-    def _execute_syncing_protocol(self, transport : SecureNetworkTransport, peer_hash : bytes, pub_key : bytes):
+    def _execute_pairing_server(self, transport : SecureNetworkTransport, peer_hash):
+        state = None
+        try:
+            peer_key = self._opcode_check(transport.receive_message(), Opcodes.DSA_PUB, transport, Opcodes.PUB_ERR)
+            _, self_key = self.my_identity.generate_key()
+            _[:] = b'\x00' * len(_) 
+            transport.send_message(Opcodes.DSA_PUB, self_key)
+            if hashing.hash_verify(peer_key, peer_hash):
+                state1 = os.urandom(4)
+                state = state1
+            else:
+                state2 = Opcodes.ERR_MATH
+                state = state2
+                transport.send_message(Opcodes.HASH_ERR)
+                raise SecurityError("Hash does not match key!")
+            if state == state1:
+                peer_devc_meta = self._opcode_check(transport.receive_message(), Opcodes.DEVC_ID, transport, Opcodes.ID_ERR)
+                self_devc_meta = self.get_device_identity() #This is wrong make this json and in bytes. add app version as well.
+                transport.send_message(Opcodes.DEVC_ID, self_devc_meta) #<---device_metadata is Placeholder
+
+                opcode, _ = transport.receive_message()
+                if opcode == Opcodes.AUTH_INT:
+                    state3 = os.urandom(4)
+                    state = state3
+                else:
+                    state4 = Opcodes.ERR_MATH
+                    state = state4
+                    raise SecurityError("Did not receive Authenticaiton")
+                
+                if state == state3:
+                    sas_pin = int(input()) #Might need to input from some other way for now placeholder
+                    transport.send_message(Opcodes.AUTH_INT)
+                    if saspass.verify_pass(sas_pin, peer_hash, self_key):
+                        transport.send_message(Opcodes.AUTH_PASS)
+                        self.peers.add_trusted_device(peer_hash, peer_devc_meta, peer_devc_meta, peer_key)
+                        #send to syncing here
+                    else:
+                        transport.send_message(Opcodes.AUTH_FAIL)
+                        raise SecurityError("SAS PIN FAILED")
+                else:
+                    raise SecurityError("Some SecurityError")
+            else:
+                raise SecurityError("Some SecurityError")
+                       
+        except Exception as e:
+            print(f"[{Opcodes.ERR_FATAL.decode('utf-8')}] Routing failure: {e}")
+
+        finally:
+            transport.close_connection()
+    
+    def _execute_pairing_client(self, transport : SecureNetworkTransport, peer_hash):
+        state = None
+
+        try:
+            _, self_key = self.my_identity.generate_key()
+            _[:] = b'\x00' * len(_)
+            transport.send_message(Opcodes.DSA_PUB, self_key)
+            peer_key = self._opcode_check(transport.receive_message(), Opcodes.DSA_PUB, transport, Opcodes.PUB_ERR)
+
+            if hashing.hash_verify(peer_key, peer_hash):
+                state1 = os.urandom(4)
+            else:
+                state2 = "E1"
+                transport.send_message(Opcodes.HASH_ERR)
+                raise SecurityError("Hash does not match key!")
+            if state == state1:
+
+                self_devc_meta = self.get_device_identity()
+                transport.send_message(Opcodes.DEVC_ID, self_devc_meta)
+                peer_devc_meta = self._opcode_check(transport.receive_message(), Opcodes.DEVC_ID, transport, Opcodes.ID_ERR)
+
+                opcode, _ = transport.receive_message()
+                if opcode == Opcodes.AUTH_INT:
+                    state3 = os.urandom(4)
+                    state = state3
+                else:
+                    state4 = Opcodes.ERR_MATH
+                    state = state4
+                    raise SecurityError("Did not receive Authenticaiton")
+                
+                if state == state3:
+                    PIN = saspass.derive_pass(peer_key, self_key)
+                    print(PIN)
+                    opcode2, _ = transport.receive_message()
+                    if opcode2 == Opcodes.AUTH_PASS:
+                        self.peers.add_trusted_device(peer_hash, peer_devc_meta, peer_devc_meta, peer_key)
+                        #send to syncing here
+                    elif opcode2 == Opcodes.AUTH_FAIL:
+                        raise SecurityError("ENTERED WRONG SAS PIN ")
+
+        except Exception as e:
+            print(f"[{Opcodes.ERR_FATAL.decode('utf-8')}] Routing failure: {e}")
+
+        finally:
+            transport.close_connection()
+
+    def _execute_sync_server(self, transport : SecureNetworkTransport, peer_hash : bytes):
         
-        peer_pub_key = self._opcode_check(transport.receive_message(timeout = 10.0), Opcodes.DSA_PUB, transport)
 
-        if not hashing.hash_verify(peer_pub_key, peer_hash):
-            transport.send_message(Opcodes.HASH_ERR)
-            raise ValueError("Public Key does not match the provided hash")
+                
 
-        transport.send_message(Opcodes.DSA_PUB, pub_key)
-        
-
-        bob_metadata = self._opcode_check(
-            transport.receive_message(timeout = 10.0),
-            Opcodes.DEVC_ID,
-            transport,
-            Opcodes.ID_ERR 
-            )
-        
-
-        self.peers.add_trusted_device(peer_hash, )
         
         
         

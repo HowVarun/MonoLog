@@ -19,8 +19,9 @@ class Opcodes:
     DEVC_ID   = b"I3000"  # "Here is my Device Name and OS Type (JSON)."
     ID_ERR    = b"I3001"  # "I could not parse your Device ID JSON."
     
-    AUTH_PASS = b"I4000"  # "My human typed the correct SAS PIN!"
-    AUTH_FAIL = b"I4001"  # "My human typed the wrong SAS PIN. Aborting."
+    AUTH_INT  = b"I4000"  # "User has initiated a SAS PIN GENERATION/Acknowledge Sas PIN Generation"
+    AUTH_PASS = b"I4001"  # "User has entered the correct SAS PIN!"
+    AUTH_FAIL = b"I4002"  # "Any Type of Auth Failure"
 
 
     TRUST_QRY = b"I5000"  # "Am I still in your Trusted Devices database?"
