@@ -1,7 +1,6 @@
 import os
 import time
 from modules.orchestrator import VaultManager
-from modules.daemons import Defragmentation 
 
 def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -15,26 +14,31 @@ def explore_vault(manager):
     
     while True:
         clear_screen()
+        # Fetching tuples of (uuid, v_ts) from the new DB architecture
         active_files = manager.vaultdb.get_active_files()
         
         folders = set()
         files = []
+        item_map_by_uuid = {} # We need to map UUIDs, not just paths now
         
-        for path in active_files:
+        for uuid, v_ts in active_files:
+            meta = manager.vaultdb.get_meta(uuid, v_ts)
+            path = meta['virtual_path']
+            
             if path.startswith(current_dir):
                 remainder = path[len(current_dir):]
                 if "/" in remainder:
                     folder_name = remainder.split("/")[0]
                     folders.add(folder_name)
                 elif remainder:
-                    files.append(remainder)
+                    files.append((remainder, uuid, v_ts))
                     
         folders = sorted(list(folders))
-        files = sorted(files)
+        files = sorted(files, key=lambda x: x[0])
         
-        print("\n" + "="*40)
+        print("\n" + "="*50)
         print(f" 📂 SELECT FILE: {current_dir}")
-        print("="*40)
+        print("="*50)
         print("0. [.. Go Back / Cancel]")
         
         item_map = {}
@@ -45,9 +49,9 @@ def explore_vault(manager):
             item_map[str(index)] = {"type": "dir", "name": f}
             index += 1
             
-        for f in files:
-            print(f"{index}. 📄 {f}")
-            item_map[str(index)] = {"type": "file", "name": f}
+        for f_name, uuid, v_ts in files:
+            print(f"{index}. 📄 {f_name}")
+            item_map[str(index)] = {"type": "file", "name": f_name, "uuid": uuid, "v_ts": v_ts}
             index += 1
             
         if not folders and not files:
@@ -69,7 +73,8 @@ def explore_vault(manager):
             if selected["type"] == "dir":
                 current_dir += selected["name"] + "/"
             else:
-                return current_dir + selected["name"]
+                # We return the exact UUID and Timestamp so the Orchestrator can process it
+                return selected["uuid"], selected["v_ts"]
 
 def pick_directory(manager):
     """Interactive explorer for choosing where to save a new file."""
@@ -80,7 +85,10 @@ def pick_directory(manager):
         active_files = manager.vaultdb.get_active_files()
         
         folders = set()
-        for path in active_files:
+        for uuid, v_ts in active_files:
+            meta = manager.vaultdb.get_meta(uuid, v_ts)
+            path = meta['virtual_path']
+            
             if path.startswith(current_dir):
                 remainder = path[len(current_dir):]
                 if "/" in remainder:
@@ -130,7 +138,7 @@ def pick_directory(manager):
 def main_menu():
     clear_screen()
     print("\n" + "="*40)
-    print(" 🛡️  SECURE VAULT - TERMINAL INTERFACE  ")
+    print(" 🛡️  SECURE VAULT V2 - TEST INTERFACE  ")
     print("="*40)
     print("1. Create New Vault")
     print("2. Unlock Existing Vault")
@@ -142,11 +150,12 @@ def vault_menu(vault_path):
     print("\n" + "="*40)
     print(f" 🔓 ACTIVE VAULT: {os.path.basename(vault_path)}")
     print("="*40)
-    print("1. Add a File (Interactive Ingest)")
+    print("1. Add a File (Ingest)")
     print("2. Preview / Launch a File")
     print("3. Delete a File")
-    print("4. Vacuum (Defragment)")
-    print("5. Lock & Close Vault")
+    print("4. Rename a File")
+    print("5. View Network Sync Ledger (Debug)")
+    print("6. Lock & Close Vault")
     return input("Select an option: ")
 
 def run_cli():
@@ -154,7 +163,6 @@ def run_cli():
     active_vault_path = ""
     vaults_dir = "Vaults"
     
-    # Ensure the dedicated folder always exists
     os.makedirs(vaults_dir, exist_ok=True)
 
     while True:
@@ -162,7 +170,7 @@ def run_cli():
             choice = main_menu()
             
             if choice == '1':
-                path = input("\nEnter new vault filename (e.g., my_vault.scaf): ")
+                path = input("\nEnter new vault filename (e.g., test.scaf): ")
                 if not path.endswith('.scaf'):
                     path += '.scaf'
                 active_vault_path = os.path.join(vaults_dir, path)
@@ -180,7 +188,6 @@ def run_cli():
                     time.sleep(2)
 
             elif choice == '2':
-                # [+] NEW: Auto-detecting existing vaults
                 existing_vaults = [f for f in os.listdir(vaults_dir) if f.endswith('.scaf')]
                 
                 if not existing_vaults:
@@ -239,40 +246,75 @@ def run_cli():
                         input(f"\n[!] Error: {e}. Press Enter.")
 
             elif choice == '2':
-                v_path = explore_vault(manager)
-                if v_path:
-                    print(f"\n[*] Decrypting and launching [{v_path}] in ghost mode...")
+                selection = explore_vault(manager)
+                if selection:
+                    file_uuid, v_ts = selection
+                    meta = manager.vaultdb.get_meta(file_uuid, v_ts)
+                    print(f"\n[*] Decrypting and launching [{meta['virtual_path']}]...")
                     try:
-                        manager.preview_file(v_path)
+                        manager.preview_file(file_uuid, v_ts)
                         input(f"\n[+] Ghost file launched! Press Enter to continue.")
                     except Exception as e:
                         input(f"\n[!] Error: {e}. Press Enter.")
 
             elif choice == '3':
-                v_path = explore_vault(manager)
-                if v_path:
-                    confirm = input(f"\nAre you sure you want to delete [{v_path}]? (y/n): ")
+                selection = explore_vault(manager)
+                if selection:
+                    file_uuid, v_ts = selection
+                    meta = manager.vaultdb.get_meta(file_uuid, v_ts)
+                    
+                    confirm = input(f"\nAre you sure you want to delete [{meta['virtual_path']}]? (y/n): ")
                     if confirm.lower() == 'y':
                         try:
-                            manager.vaultdb.delete_file(v_path, int(time.time()))
-                            input(f"\n[-] {v_path} marked for deletion. Press Enter.")
+                            # Using Orchestrator instead of raw DB call!
+                            manager.delete_file(file_uuid, v_ts)
+                            input(f"\n[-] {meta['virtual_path']} marked for deletion. Press Enter.")
                         except Exception as e:
                             input(f"\n[!] Error: {e}. Press Enter.")
-
+                            
             elif choice == '4':
-                print("\n[*] Initiating Defragmentation. Shredding dead space...")
-                try:
-                    defragger = Defragmentation(manager)
-                    defragger.vacuum()
-                    input("\n[+] Vacuum complete. Dead space destroyed. Press Enter.")
-                except Exception as e:
-                    input(f"\n[!] Error: {e}. Press Enter.")
-
+                selection = explore_vault(manager)
+                if selection:
+                    file_uuid, v_ts = selection
+                    meta = manager.vaultdb.get_meta(file_uuid, v_ts)
+                    
+                    print(f"\nCurrent Path: {meta['virtual_path']}")
+                    new_path = input("Enter new path (e.g. /Photos/vacation.jpg): ")
+                    if new_path:
+                        if not new_path.startswith('/'):
+                            new_path = '/' + new_path
+                        try:
+                            manager.rename_file(file_uuid, v_ts, new_path)
+                            input(f"\n[+] Renamed successfully! Press Enter.")
+                        except Exception as e:
+                            input(f"\n[!] Error: {e}. Press Enter.")
+                            
             elif choice == '5':
+                clear_screen()
+                print("\n" + "="*40)
+                print(" 📜 CURRENT SYNC LEDGER STATE")
+                print("="*40)
+                try:
+                    ledger_data = manager.ledger.get_ledger()
+                    if not ledger_data:
+                        print("Ledger is currently empty (Fully synced or new).")
+                    else:
+                        for idx, event in enumerate(ledger_data, 1):
+                            uuid, v_ts, action = event
+                            meta = manager.vaultdb.get_meta(uuid, v_ts)
+                            path = meta['virtual_path'] if meta else "UNKNOWN (Deleted?)"
+                            print(f"{idx}. [{action}] {uuid.hex()[:8]}... | TS: {v_ts} | Path: {path}")
+                except Exception as e:
+                    print(f"[!] Could not read ledger: {e}")
+                input("\nPress Enter to return.")
+
+            elif choice == '6':
                 manager.lock_vault()
-                input("\n[*] Vault locked. RAM shredded. Press Enter.")
+                input("\n[*] Vault locked. RAM shredded. Ledger encrypted. Press Enter.")
                 manager = None
                 active_vault_path = ""
 
 if __name__ == "__main__":
     run_cli()
+
+    

@@ -22,7 +22,9 @@ class VaultDynamicManager:
         self.encrypt_aesgcm = None
     
     def run_vacuum(self):
-        Defragmentation.vacuum()
+        defrag = Defragmentation(self.orchestrator)
+        defrag.vacuum()
+        #==================================
     
     def change_vault_password(self, old_mp, old_wp, new_mp, new_wp):
         self.orchestrator.lock_vault()
@@ -31,7 +33,7 @@ class VaultDynamicManager:
         local_dek = self.orchestrator.dek
         #==================================
         kek_salt = os.urandom(16)
-        self.kdf = MfaKdf(existing_salt = kek_salt)
+        self.kdf = MfaKdf(existing_salt=kek_salt)
         kek = self.kdf.derive(new_mp, new_wp)
         #==================================
         self.aesgcm = AesGcm(kek)
@@ -43,10 +45,10 @@ class VaultDynamicManager:
         backup_paths = (self.filepath + '.ahs', self.filepath + '.als')
         for backup_path in backup_paths:
             if os.path.exists(backup_path):
-                    try:
-                        os.remove(backup_path)
-                    except OSError:
-                        pass
+                try:
+                    os.remove(backup_path)
+                except OSError:
+                    pass
         #==================================
         
     def prepare_vault_transfer(self, shared_secret: bytes):
@@ -62,12 +64,11 @@ class VaultDynamicManager:
             magic_num = struct.pack('>4s', b"TRAN")
             tfile.write(magic_num)
             tfile.seek(23)
-            tfile.write( dek_iv + dek_encrypted)
+            tfile.write(dek_iv + dek_encrypted)
             os.fsync(tfile.fileno())
         return transit_path
     
     def process_received_vault(self, received_tmp_path: str, final_dest_path: str, shared_secret: bytes, new_mp: str, new_wp: str):
-        
         with open(received_tmp_path, 'r+b') as tfile:
             tfile.seek(0)
             magic_num = tfile.read(4)
@@ -82,7 +83,7 @@ class VaultDynamicManager:
             dek = bytearray(transit_aesgcm.decrypt_cipherstream(dek_iv, dek_cipher))
 
             salt = os.urandom(16)
-            kdf = MfaKdf(existing_salt = salt)
+            kdf = MfaKdf(existing_salt=salt)
             kek = bytearray(kdf.derive(new_mp, new_wp))
 
             local_aesgcm = AesGcm(kek)
@@ -99,22 +100,20 @@ class VaultDynamicManager:
         dek[:] = b'\x00' * len(dek)
         kek[:] = b'\x00' * len(kek)
         return True
-    
-    #Changing DEK
 
-    def _generate_file_list(self, active_virtual_paths: list):
-        for vpath in active_virtual_paths:
-            chunks = self.hashmap.get_meta(vpath)
+    def _generate_file_list(self, active_file_ids: list):
+        for file_id in active_file_ids:
+            chunks = self.hashmap.get_meta(file_id)
             for chunk in chunks:
-                yield (vpath, chunk['iv'], chunk['start'], chunk['end'])
+                yield (file_id, chunk['iv'], chunk['start'], chunk['end'])
     
     def _transfer_reencrypt_chunks(self, arguments: tuple):
-        virtual_path, iv, start, end = arguments
+        file_id, iv, start, end = arguments
         chunk_ct = self.vaultio.read_cargo(start, end)
         chunk_pt = bytearray(self.decrypt_aesgcm.decrypt_cipherstream(iv, chunk_ct))
         n_iv, n_chunk_ct = self.encrypt_aesgcm.encrypt_cipherstream(chunk_pt)
         chunk_pt[:] = b'\x00' * len(chunk_pt)
-        return (virtual_path, n_iv, n_chunk_ct)
+        return (file_id, n_iv, n_chunk_ct)
     
     def sync_map_to_disc(self, new_map_dict: dict, full_db_metadata: dict):
         tmp_hashmap = VaultMap()
@@ -140,7 +139,6 @@ class VaultDynamicManager:
         self.tmp_path = os.path.join(tempfile.gettempdir(), f"{os.path.basename(self.filepath)}.tmp")
         self.tmpvaultio = VaultIO(self.tmp_path)
         #==================================
-        #initialize with vulnerable keys with bytearray for memory deletion later
         old_kek = bytearray(32)
         old_dek = bytearray(32)
         new_kek = bytearray(32)
@@ -153,7 +151,7 @@ class VaultDynamicManager:
             
             if old_kek != self.orchestrator.kek_hash:
                 raise ValueError("Authentication failed. Cannot rotate DEK.")
-            #==================================   
+            #================================== 
             kek_aes = AesGcm(old_kek)
             dek_iv, dek_cipher = self.vaultio.read_lockbox()
             old_dek[:] = kek_aes.decrypt_cipherstream(dek_iv, dek_cipher)
@@ -162,7 +160,6 @@ class VaultDynamicManager:
             n_kdf = MfaKdf(existing_salt=new_salt)
             new_kek[:] = n_kdf.derive(master_password, weak_password)
             #==================================
-            #encryption and decryption aesgcm class object
             self.encrypt_aesgcm = AesGcm(new_dek)
             self.decrypt_aesgcm = AesGcm(old_dek)
             #==================================
@@ -170,10 +167,9 @@ class VaultDynamicManager:
             n_dek_iv, n_dek_cipher = new_kek_aes.encrypt_cipherstream(new_dek)
             #==================================
             full_db_metadata = self.vaultdb.get_complete_meta()
-            vpath_list = list(self.hashmap.map.keys())
-            new_map_dict = {vpath: [] for vpath in vpath_list}
+            file_id_list = self.hashmap.get_all_file_ids()
+            new_map_dict = {file_id: [] for file_id in file_id_list}
             #==================================
-            #portalocker is already held by VaultManager
             with self.orchestrator.io_lock:
                 __, major, minor, patch, _ = self.vaultio.read_header()
                 version_str = f"{major}.{minor}.{patch}"
@@ -182,20 +178,20 @@ class VaultDynamicManager:
                     version=version_str, 
                     salt=new_salt, 
                     dek_iv=n_dek_iv, 
-                    dek_cipher=n_dek_cipher, 
-                    pointer_P=0, 
-                    pointer_L=0
+                    encrypted_dek=n_dek_cipher, 
+                    pointer_P = 0, 
+                    pointer_L = 0
                 )
                 #==================================
                 #mutli-threading encryption and writing
                 with concurrent.futures.ThreadPoolExecutor() as executor:
-                    mapper = executor.map(self._transfer_reencrypt_chunks, self._generate_file_list(vpath_list))
-                    for virtual_path, iv, ciphertext in mapper:
+                    mapper = executor.map(self._transfer_reencrypt_chunks, self._generate_file_list(file_id_list))
+                    for file_id, iv, ciphertext in mapper:
                         start = self.tmpvaultio.get_eof()
                         end = start + len(ciphertext)
                         
                         self.tmpvaultio.append_cargo(ciphertext)
-                        new_map_dict[virtual_path].append({
+                        new_map_dict[file_id].append({
                             "iv": iv,
                             "start": start,
                             "end": end
@@ -203,7 +199,6 @@ class VaultDynamicManager:
                 #==================================
                 self.sync_map_to_disc(new_map_dict, full_db_metadata)
                 os.replace(self.tmp_path, self.filepath)
-        
         #==================================
         #wiping shit from memory
         finally:

@@ -9,7 +9,7 @@ import json
 import time
 
 from modules.system import SecureNetworkTransport, PrivateKeyManager, TrustedDevicesDatabase, Opcodes
-from modules.network import PQCHandshake, DesktopDiscover
+from modules.network import DesktopDiscover
 from modules.crypto_core import hashing, SasPass
 
 class SecurityError(Exception):
@@ -35,7 +35,7 @@ class SyncWorker:
         self._listener = None 
         self._thread_pool = concurrent.futures.ThreadPoolExecutor(5)
         
-    
+    #==========================================================
     @staticmethod
     def get_device_identity():
         device_name = socket.gethostname()
@@ -89,6 +89,7 @@ class SyncWorker:
 
         return device_name, device_type
 
+    #==========================================================
     def _opcode_check(self, received_msg: tuple, expected_opcode: bytes, transport: SecureNetworkTransport, fail_opcode: bytes = Opcodes.BYE_FORCE) -> bytes:
         opcode_recv, payload = received_msg
         
@@ -101,25 +102,23 @@ class SyncWorker:
          
     
     def _verify_rcvd(self, transport : SecureNetworkTransport):
-        transport.send_message(Opcodes.ACQ_OK)
+        transport.send_message(Opcodes.ACK_OK)
     
     def _verify_sent(self, transport : SecureNetworkTransport):
         opcode, _ = transport.receive_message()
-        if opcode == Opcodes.ACQ_OK:
+        if opcode == Opcodes.ACK_OK:
             return True
         else:
-            transport.send_message(Opcodes.ACQ_FAIL)
+            transport.send_message(Opcodes.ACK_FAIL)
 
     #==========================================================
-    
     def start(self):
         if self.is_running:
             return False
         else:
             self.peers.create_db()
             identity = self.pvt_key_mgr.get_or_create_identity()
-            _, dsa_pub_key = identity.generate_key()
-            _[:] = b'\x00' * len(_) #deleting pvt_key 
+            dsa_pub_key = identity.generate_key("pub")
             self.discovery.broadcast_presence(dsa_pub_key)
 
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -127,6 +126,7 @@ class SyncWorker:
             self.server_socket.bind(("0.0.0.0", self.port))
             self.server_socket.listen(5)
             
+            self.is_running = True
             self._listener = threading.Thread(target=self._network_listener, daemon=True)
             self._listener.start()
     
@@ -138,20 +138,19 @@ class SyncWorker:
             self.server_socket.close()
     
     def _network_listener(self):
-        while not self.is_running:
+        while self.is_running:
             try:
-                self.socket.settimeout(1.0)
+                self.server_socket.settimeout(1.0)
                 client_sock, addr = self.server_socket.accept()
                 client_sock.settimeout(None)
-                self._thread_pool.submit(self._route_inbound_conn, client_sock, addr)
+                self._thread_pool.submit(self._route_inbound_connection, client_sock, addr)
             except socket.timeout:
                 continue
             except Exception:
-                if self.is_running:
+                if not self.is_running:
                     break
     
     #===========================================================================================================================
-
     def _inbound_router(self, transport : SecureNetworkTransport):
 
         opcode_received, peer_hash = transport.receive_message()
@@ -165,27 +164,28 @@ class SyncWorker:
                 #send to syncing HERE
             else:
                 transport.send_message(Opcodes.DEVC_RM)
-                #send to pairing(special case)
+                self._execute_pairing_server(transport, peer_hash)
 
         elif opcode_received == Opcodes.DSA_HASH:
             peer_data = self.peers.is_device_trusted(peer_hash)
 
             if not peer_data:
                 transport.send_message(Opcodes.TRUST_NO)
-                #send to pairing HERE
+                self._execute_pairing_server(transport, peer_hash)
             elif peer_data:
                 transport.send_message(Opcodes.TRUST_YES)
                 recv_op, _ = transport.receive_message()
                 if recv_op == Opcodes.DEVC_RM:
                     self.peers.remove_peer(peer_hash)
                     transport.send_message(Opcodes.TRUST_RM)
-                    #send to pairing HERE
+                    self._execute_pairing_server(transport, peer_hash)
             else:
                 raise SecurityError("Trusted Devices database compromised")
         
         elif opcode_received == Opcodes.DEVC_RM:
             self.peers.remove_peer(peer_hash)
             transport.send_message(Opcodes.TRUST_RM)
+            self._execute_pairing_server(transport, peer_hash)
         else:
             raise ValueError("Did not recieve a valid routing opcode")
 
@@ -197,20 +197,14 @@ class SyncWorker:
             transport.send_message(Opcodes.PONG, ping_bytes)
             self._inbound_router(transport)
 
-            # _, pub_key = self.my_identity.generate_key()
-            # _[:] = b'\x00' * len(_) 
-            # pub_hash = hashing.hash_key(pub_key)
-            # transport.send_message(Opcodes.DSA_HASH, pub_hash)  <- Use these methods inside pairing and syncing
         except Exception as e:
             print(f"[{Opcodes.ERR_FATAL.decode('utf-8')}] Routing failure with {addr[0]}: {e}")
         finally:
             transport.close_connection()
+            
     #===========================================================================================================================
-
     def _outbound_router(self, transport : SecureNetworkTransport, expected_mdns_hash : bytes):
-        _, pub_key = self.my_identity.generate_key()
-        _[:] = b'\x00' * len(_)
-        pub_hash = hashing.hash_key(pub_key)
+        pub_hash = hashing.hash_key(self.my_identity.generate_key("pub"))
         
         is_known = self.peers.is_device_trusted(expected_mdns_hash)
 
@@ -224,19 +218,19 @@ class SyncWorker:
             elif opcode == Opcodes.DEVC_RM:
                 self.peers.remove_peer(expected_mdns_hash)
                 transport.send_message(Opcodes.TRUST_RM)
-                #send to pairing (special case)
+                self._execute_pairing_client(transport, expected_mdns_hash)
             else:
                 raise SecurityError("Invalid opcode at current stage")
         else:
             transport.send_message(Opcodes.DSA_HASH, pub_hash)
             opcode, _ = transport.receive_message()
             if opcode == Opcodes.TRUST_NO:
-                pass #send to pairing
+                self._execute_pairing_client(transport, expected_mdns_hash)
             elif opcode == Opcodes.TRUST_YES:
                 transport.send_message(Opcodes.DEVC_RM)
                 opcode, _ = transport.receive_message()
                 if opcode == Opcodes.TRUST_RM:
-                    pass # send to pairing
+                    self._execute_pairing_client(transport, expected_mdns_hash)
                 else:
                     raise SecurityError("Secondary device not unpaired successfully!")
             else:
@@ -263,117 +257,108 @@ class SyncWorker:
             transport.close_connection()
 
     #===========================================================================================================================
-    
     def _execute_pairing_server(self, transport : SecureNetworkTransport, peer_hash):
-        state = None
         try:
             peer_key = self._opcode_check(transport.receive_message(), Opcodes.DSA_PUB, transport, Opcodes.PUB_ERR)
-            _, self_key = self.my_identity.generate_key()
-            _[:] = b'\x00' * len(_) 
+            self_key = self.my_identity.generate_key("pub")
             transport.send_message(Opcodes.DSA_PUB, self_key)
-            if hashing.hash_verify(peer_key, peer_hash):
-                state1 = os.urandom(4)
-                state = state1
-            else:
-                state2 = Opcodes.ERR_MATH
-                state = state2
+            
+            if not hashing.hash_verify(peer_key, peer_hash):
                 transport.send_message(Opcodes.HASH_ERR)
                 raise SecurityError("Hash does not match key!")
-            if state == state1:
-                peer_devc_meta = self._opcode_check(transport.receive_message(), Opcodes.DEVC_ID, transport, Opcodes.ID_ERR)
-                self_devc_meta = self.get_device_identity() #This is wrong make this json and in bytes. add app version as well.
-                transport.send_message(Opcodes.DEVC_ID, self_devc_meta) #<---device_metadata is Placeholder
-
-                opcode, _ = transport.receive_message()
-                if opcode == Opcodes.AUTH_INT:
-                    state3 = os.urandom(4)
-                    state = state3
-                else:
-                    state4 = Opcodes.ERR_MATH
-                    state = state4
-                    raise SecurityError("Did not receive Authenticaiton")
                 
-                if state == state3:
-                    sas_pin = int(input()) #Might need to input from some other way for now placeholder
-                    transport.send_message(Opcodes.AUTH_INT)
-                    if SasPass.verify_pass(sas_pin, peer_hash, self_key):
-                        transport.send_message(Opcodes.AUTH_PASS)
-                        self.peers.add_trusted_device(peer_hash, peer_devc_meta, peer_devc_meta, peer_key)
-                        #send to syncing here
-                    else:
-                        transport.send_message(Opcodes.AUTH_FAIL)
-                        raise SecurityError("SAS PIN FAILED")
+            peer_devc_meta_bytes = self._opcode_check(transport.receive_message(), Opcodes.DEVC_ID, transport, Opcodes.ID_ERR)
+            
+            try:
+                peer_meta = json.loads(peer_devc_meta_bytes.decode('utf-8'))
+                peer_name = peer_meta.get("device_name", "Unknown Device")
+                peer_type = peer_meta.get("device_type", "Unknown OS")
+            except Exception:
+                transport.send_message(Opcodes.ID_ERR)
+                raise SecurityError("Malformed Metadata payload JSON")
+                
+            self_devc_meta = {
+                "device_name": self.local_name,
+                "device_type": self.local_type,
+                "app_version": "1.0"
+            }
+            transport.send_message(Opcodes.DEVC_ID, json.dumps(self_devc_meta).encode('utf-8')) 
+
+            # Request Pin out-of-band on Alice's side (To be replaced by UI Thread-Event later)
+            sas_pin = input(f"Enter the 6-digit PIN displayed on Bob's screen: ").strip()
+            
+            if hashing.verify_pass(sas_pin, self_key, peer_key):
+                transport.send_message(Opcodes.AUTH_PASS)
+                
+                opcode, _ = transport.receive_message()
+                if opcode == Opcodes.AUTH_PASS:
+                    self.peers.add_trusted_device(
+                        ml_dsa_hash=peer_hash,
+                        device_name=peer_name,
+                        device_type=peer_type,
+                        ml_dsa_pub_key=peer_key,
+                        added_timestamp=time.time(),
+                        last_seen=time.time()
+                    )
+                    transport.send_message(Opcodes.BYE_GRACE)
                 else:
-                    raise SecurityError("Some SecurityError")
+                    raise SecurityError("Authentication handshake failed during commitment exchange")
             else:
-                raise SecurityError("Some SecurityError")
+                transport.send_message(Opcodes.AUTH_FAIL)
+                raise SecurityError("SAS PIN Verification Failed!")
                        
         except Exception as e:
-            print(f"[{Opcodes.ERR_FATAL.decode('utf-8')}] Routing failure: {e}")
+            print(f"[{Opcodes.ERR_FATAL.decode('utf-8')}] Pairing failure: {e}")
 
-        finally:
-            transport.close_connection()
-    
+    #===========================================================================================================================
     def _execute_pairing_client(self, transport : SecureNetworkTransport, peer_hash):
-        state = None
-
         try:
-            _, self_key = self.my_identity.generate_key()
-            _[:] = b'\x00' * len(_)
+            self_key = self.my_identity.generate_key("pub")
             transport.send_message(Opcodes.DSA_PUB, self_key)
             peer_key = self._opcode_check(transport.receive_message(), Opcodes.DSA_PUB, transport, Opcodes.PUB_ERR)
 
-            if hashing.hash_verify(peer_key, peer_hash):
-                state1 = os.urandom(4)
-            else:
-                state2 = "E1"
+            if not hashing.hash_verify(peer_key, peer_hash):
                 transport.send_message(Opcodes.HASH_ERR)
                 raise SecurityError("Hash does not match key!")
-            if state == state1:
 
-                self_devc_meta = self.get_device_identity()
-                transport.send_message(Opcodes.DEVC_ID, self_devc_meta)
-                peer_devc_meta = self._opcode_check(transport.receive_message(), Opcodes.DEVC_ID, transport, Opcodes.ID_ERR)
+            self_devc_meta = {
+                "device_name": self.local_name,
+                "device_type": self.local_type,
+                "app_version": "1.0"
+            }
+            transport.send_message(Opcodes.DEVC_ID, json.dumps(self_devc_meta).encode('utf-8'))
+            
+            peer_devc_meta_bytes = self._opcode_check(transport.receive_message(), Opcodes.DEVC_ID, transport, Opcodes.ID_ERR)
+            
+            try:
+                peer_meta = json.loads(peer_devc_meta_bytes.decode('utf-8'))
+                peer_name = peer_meta.get("device_name", "Unknown Device")
+                peer_type = peer_meta.get("device_type", "Unknown OS")
+            except Exception:
+                transport.send_message(Opcodes.ID_ERR)
+                raise SecurityError("Malformed Metadata payload JSON")
 
-                opcode, _ = transport.receive_message()
-                if opcode == Opcodes.AUTH_INT:
-                    state3 = os.urandom(4)
-                    state = state3
-                else:
-                    state4 = Opcodes.ERR_MATH
-                    state = state4
-                    raise SecurityError("Did not receive Authenticaiton")
-                
-                if state == state3:
-                    PIN = SasPass.derive_pass(peer_key, self_key)
-                    print(PIN)
-                    opcode2, _ = transport.receive_message()
-                    if opcode2 == Opcodes.AUTH_PASS:
-                        self.peers.add_trusted_device(peer_hash, peer_devc_meta, peer_devc_meta, peer_key)
-                        #send to syncing here
-                    elif opcode2 == Opcodes.AUTH_FAIL:
-                        raise SecurityError("ENTERED WRONG SAS PIN ")
+            PIN = SasPass.derive_pass(peer_key, self_key)
+            print(f"\n======================================")
+            print(f"     SECUREVAULT PAIRING PIN          ")
+            print(f"     PIN: {PIN}                       ")
+            print(f"======================================\n")
+            
+            opcode, _ = transport.receive_message(timeout=60.0) # Allow up to 1 minute for Alice's input
+            
+            if opcode == Opcodes.AUTH_PASS:
+                self.peers.add_trusted_device(
+                    ml_dsa_hash=peer_hash,
+                    device_name=peer_name,
+                    device_type=peer_type,
+                    ml_dsa_pub_key=peer_key,
+                    added_timestamp=time.time(),
+                    last_seen=time.time()
+                )
+                transport.send_message(Opcodes.AUTH_PASS)
+                self._opcode_check(transport.receive_message(), Opcodes.BYE_GRACE, transport)
+            elif opcode == Opcodes.AUTH_FAIL:
+                raise SecurityError("ENTERED WRONG SAS PIN")
 
         except Exception as e:
-            print(f"[{Opcodes.ERR_FATAL.decode('utf-8')}] Routing failure: {e}")
-
-        finally:
-            transport.close_connection()
-
-    def _execute_sync_server(self, transport : SecureNetworkTransport, peer_hash : bytes):
-        pass
-
-                
-
-        
-        
-        
-        
-
-
-
-            
-
-
-            
-
+            print(f"[{Opcodes.ERR_FATAL.decode('utf-8')}] Pairing failure: {e}")
