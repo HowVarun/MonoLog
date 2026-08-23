@@ -1,5 +1,5 @@
 import socket
-from modules.system import SecureNetworkTransport
+from .networktrans import SecureNetworkTransport
 from modules.crypto_core import SasPass
 
 class PQCHandshake:

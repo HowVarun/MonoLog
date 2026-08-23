@@ -34,7 +34,7 @@ class Opcodes:
 
 
     # =========================================================================
-    # VAULT & SYNC OPERATIONS (V) - Moving the actual data
+    # VAULT(V) - Moving the actual data
     # =========================================================================
     SYNC_REQ  = b"V1000"  # "Do you have any pending vault updates for me?"
     SYNC_NUL  = b"V1001"  # "No, my queue is empty. You are up to date."
@@ -49,6 +49,14 @@ class Opcodes:
     VAULT_DATA= b"V4000"  # "Incoming: A File Data update (JSON + stream of bytes attached)."
     VDATA_ERR = b"V4001"  # "I failed to apply the data update (e.g., disk full, hash mismatch)."
 
+    # =========================================================================
+    # SYNC CONTROL (S) - Ledger and Delta exchanges
+    # =========================================================================
+    SYNCO     = b"S1000"  # Initialization request for entering sync queue
+    SYNC_LDG  = b"S2000"  # MessagePack Sync Ledger transmission
+    SYNC_DLT  = b"S2001"  # Delta Ledger transmission for mid-session UUIDs
+
+    
     # =========================================================================
     # NUCLEAR OPERATIONS (N) - Highly destructive/sensitive commands
     # =========================================================================
@@ -72,3 +80,21 @@ class Opcodes:
     ERR_ENV   = b"E3000"  # OS-level error (Out of RAM, Disk Full, Permission Denied).
     ERR_NET   = b"E4000"  # Socket dropped mid-stream or timed out.
     ERR_FATAL = b"E9999"  # Generic / Unhandled Python exception.
+
+class LocalOpcodes:
+    # --- EVERYDAY LOCAL I/O (Q1) ---
+    LOCAL_INGEST = b"Q1000"  
+    LOCAL_DELETE = b"Q1001"  
+    LOCAL_RENAME = b"Q1002"  
+    LOCAL_MARK_SYNC = b"Q1003" #Safely mark a ledger record as synced
+    LOCAL_EDIT = b"Q1004" 
+    
+    # --- NETWORK QUEUEING (Q2) ---
+    NET_DATA     = b"Q2000"  #Incoming File Data (Ingest/Edit). Maps to [V4000]
+    NET_META     = b"Q2001"  #Incoming Metadata (Rename). Maps to [V3000]
+    NET_DEL      = b"Q2002"  #Incoming Delete Action. Maps to Ledger "DELETE"
+    
+    # --- SURGICAL / NUCLEAR OPERATIONS (Q3) ---
+    VACUUM       = b"Q3000"  
+    ROTATE_DEK   = b"Q3001"  
+    CHANGE_PASS  = b"Q3002"

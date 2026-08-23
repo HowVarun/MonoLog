@@ -27,29 +27,37 @@ class VaultDynamicManager:
         #==================================
     
     def change_vault_password(self, old_mp, old_wp, new_mp, new_wp):
-        self.orchestrator.lock_vault()
-        #==================================
-        self.orchestrator.unlock_hash(old_mp, old_wp)
-        local_dek = self.orchestrator.dek
-        #==================================
-        kek_salt = os.urandom(16)
-        self.kdf = MfaKdf(existing_salt=kek_salt)
-        kek = self.kdf.derive(new_mp, new_wp)
-        #==================================
-        self.aesgcm = AesGcm(kek)
-        dek_iv, encrypted_dek = self.aesgcm.encrypt_cipherstream(local_dek)
-        #==================================
-        self.vaultio.atomic_header_swap(b'SCAF', '1.0.0', kek_salt, True)
-        self.vaultio.atomic_lockbox_swap(dek_iv, encrypted_dek, True)
-        #==================================
-        backup_paths = (self.filepath + '.ahs', self.filepath + '.als')
-        for backup_path in backup_paths:
-            if os.path.exists(backup_path):
-                try:
-                    os.remove(backup_path)
-                except OSError:
-                    pass
-        #==================================
+            kdf = MfaKdf(existing_salt=self.orchestrator.salt)
+            old_kek = kdf.derive(old_mp, old_wp)
+            
+            if bytearray(old_kek) != self.orchestrator.kek_hash:
+                raise ValueError("Authentication failed. Invalid current password.")
+                
+            #generate new salt and derive the new kek
+            new_salt = os.urandom(16)
+            new_kdf = MfaKdf(existing_salt=new_salt)
+            new_kek = new_kdf.derive(new_mp, new_wp)
+            
+            #encrypt the existing ram dek using the new kek
+            self.aesgcm = AesGcm(new_kek)
+            dek_iv, encrypted_dek = self.aesgcm.encrypt_cipherstream(self.orchestrator.dek)
+            
+            #execute atomic swaps on the physical file
+            with self.orchestrator.io_lock:
+                self.vaultio.atomic_header_swap(b'SCAF', '1.0.0', new_salt, True)
+                self.vaultio.atomic_lockbox_swap(dek_iv, encrypted_dek, True)
+                
+                #clean up
+                backup_paths = (self.filepath + '.ahs', self.filepath + '.als')
+                for backup_path in backup_paths:
+                    if os.path.exists(backup_path):
+                        try:
+                            os.remove(backup_path)
+                        except OSError:
+                            pass
+                            
+                self.orchestrator.salt = new_salt
+                self.orchestrator.kek_hash[:] = bytearray(new_kek)
         
     def prepare_vault_transfer(self, shared_secret: bytes):
         local_dek = self.orchestrator.dek
@@ -103,7 +111,8 @@ class VaultDynamicManager:
 
     def _generate_file_list(self, active_file_ids: list):
         for file_id in active_file_ids:
-            chunks = self.hashmap.get_meta(file_id)
+            uuid, v_ts = VaultMap.uuid_time(file_id) 
+            chunks = self.hashmap.get_meta(uuid, v_ts) 
             for chunk in chunks:
                 yield (file_id, chunk['iv'], chunk['start'], chunk['end'])
     
@@ -144,9 +153,11 @@ class VaultDynamicManager:
         new_kek = bytearray(32)
         new_dek = bytearray(32)
         #==================================
+        success = False
         try:
             #authenticate & extract old key
-            kdf = MfaKdf(existing_salt=self.orchestrator.salt)
+            __, _, _, _, current_salt = self.vaultio.read_header()
+            kdf = MfaKdf(existing_salt=current_salt)
             old_kek[:] = kdf.derive(master_password, weak_password)
             
             if old_kek != self.orchestrator.kek_hash:
@@ -173,14 +184,19 @@ class VaultDynamicManager:
             with self.orchestrator.io_lock:
                 __, major, minor, patch, _ = self.vaultio.read_header()
                 version_str = f"{major}.{minor}.{patch}"
+
+                map_identifier_iv = os.urandom(12)
+                P, L = 127, 0
+                map_identifier_pt = struct.pack('>QQ', P, L)
+                map_identifier_iv, map_identifier_ct = self.encrypt_aesgcm.encrypt_cipherstream(map_identifier_pt, map_identifier_iv)
                 
                 self.tmpvaultio.initialize_new_vault(
-                    version=version_str, 
-                    salt=new_salt, 
-                    dek_iv=n_dek_iv, 
-                    encrypted_dek=n_dek_cipher, 
-                    pointer_P = 0, 
-                    pointer_L = 0
+                    version_str, 
+                    new_salt, 
+                    n_dek_iv, 
+                    n_dek_cipher,
+                    map_identifier_iv,
+                    map_identifier_ct   
                 )
                 #==================================
                 #mutli-threading encryption and writing
@@ -198,11 +214,24 @@ class VaultDynamicManager:
                         })
                 #==================================
                 self.sync_map_to_disc(new_map_dict, full_db_metadata)
+
+                if self.orchestrator.hashmap is not None:
+                    self.orchestrator.hashmap.destroy()
+                    self.orchestrator.hashmap = None
+
+                self.orchestrator.dek[:] = new_dek
+                if hasattr(self.orchestrator, 'ledger') and self.orchestrator.ledger:
+                    self.orchestrator.ledger.dek[:] = new_dek
                 os.replace(self.tmp_path, self.filepath)
+
+                success = True
+
+                
         #==================================
         #wiping shit from memory
         finally:
-            if os.path.exists(self.tmp_path):
+            #rollback delte temp file only if the rotation failed
+            if not success and os.path.exists(self.tmp_path):
                 try:
                     os.remove(self.tmp_path)
                 except OSError:

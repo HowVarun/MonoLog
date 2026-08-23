@@ -5,7 +5,7 @@ import time
 
 class VaultDatabase:
     def __init__(self):
-        self.db = sqlite3.connect(':memory:')
+        self.db = sqlite3.connect(':memory:', check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.cursor = self.db.cursor()
         self._create_schema()
@@ -108,14 +108,14 @@ class VaultDatabase:
         virtual_path = current_meta['virtual_path']
         new_path = f"{virtual_path}.del_{delete_timestamp}"
         new_filename = f"{os.path.basename(virtual_path)}.del_{delete_timestamp}"
-        new_v_ts = int(time.time())
         
         query = '''UPDATE files 
                    SET is_active = 0, virtual_path = ?, filename = ?, v_ts = ? 
                    WHERE uuid = ? AND v_ts = ?'''
-        params =  (new_path, new_filename, new_v_ts, uuid, v_ts)
+        params =  (new_path, new_filename, delete_timestamp, uuid, v_ts)
         self.cursor.execute(query, params)
         self.db.commit()
+
     
     def get_active_files(self):
         query = '''

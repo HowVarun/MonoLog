@@ -8,8 +8,7 @@ import tempfile
 
 from modules.crypto_core import MfaKdf, AesGcm
 from modules.vaultmap import VaultMap, VaultDatabase
-from modules.system import VaultIO, GhostFileIO
-from modules.system import IDGenerator
+from modules.system import VaultIO, GhostFileIO, IDGenerator
 from modules.daemons import SyncLedger
 
 class VaultManager:
@@ -170,21 +169,22 @@ class VaultManager:
             map_P, map_L = struct.unpack('>QQ', map_pointer_pt)
             self.vaultio.atomic_map_swap(iv_identifier, identifier_ct, nmap_P, nmap_iv, nmap_ciphertext)
 
-    def ingest_file(self, os_filepath, virtual_filepath, existing_file_id: bytes = None, existing_v_ts: int = None):
+    def ingest_file(self, os_filepath, virtual_filepath, existing_uuid: bytes = None, existing_v_ts: int = None, override_v_ts : int = None):
         filesize = os.path.getsize(os_filepath)
-        new_v_ts = int(time.time())
+        new_v_ts = override_v_ts if override_v_ts else int(time.time())
         chunk_metadata = []
         
-        if existing_file_id and existing_v_ts:
-            file_id = existing_file_id
+        if existing_uuid and existing_v_ts:
+            
+            uuid = existing_uuid
             action = self.ledger.ACTION_EDIT
             
-            old_meta = self.vaultdb.get_meta(file_id, existing_v_ts)
+            old_meta = self.vaultdb.get_meta(uuid, existing_v_ts)
             original_created_at = old_meta["created_at"] if old_meta else new_v_ts
             
-            self.vaultdb.delete_file(file_id, existing_v_ts, new_v_ts)
+            self.vaultdb.delete_file(uuid, existing_v_ts, new_v_ts)
         else:
-            file_id = IDGenerator.generate_file_id()
+            uuid = IDGenerator.generate_file_id()
             action = self.ledger.ACTION_INGEST
             original_created_at = new_v_ts
             
@@ -203,50 +203,104 @@ class VaultManager:
                             "end" : end_byte        
                         })
                     
-                    self.hashmap.add_file(file_id, new_v_ts, chunk_metadata)
+                    self.hashmap.add_file(uuid, new_v_ts, chunk_metadata)
                     
                     meta_dict = {
                         "size_bytes" : filesize,
                         "created_at" : original_created_at, 
                         "is_active" : True
                     }
-                    self.vaultdb.inmo_file(file_id, new_v_ts, virtual_filepath, meta_dict)
-                    self.ledger.append_event(file_id, new_v_ts, action)
+                    self.vaultdb.inmo_file(uuid, new_v_ts, virtual_filepath, meta_dict)
+                    self.ledger.append_event(uuid, new_v_ts, action)
 
                     self.sync_map_to_disc()
                     
-    def delete_file(self, file_id: bytes, v_ts: int):
+    def delete_file(self, uuid: bytes, v_ts: int, override_v_ts: int = None):
         with self.io_lock:
-            delete_ts = int(time.time())
+            delete_ts = override_v_ts if override_v_ts else int(time.time())
             
-            self.vaultdb.delete_file(file_id, v_ts, delete_ts)
-            self.ledger.append_event(file_id, delete_ts, self.ledger.ACTION_DELETE)
+            self.vaultdb.delete_file(uuid, v_ts, delete_ts)
+            self.ledger.append_event(uuid, delete_ts, self.ledger.ACTION_DELETE)
             self.sync_map_to_disc()
             
-    def rename_file(self, file_id: bytes, v_ts: int, new_virtual_path: str):
+    def rename_file(self, uuid: bytes, v_ts: int, new_virtual_path: str, override_v_ts: int = None):
         with self.io_lock:
-            new_v_ts = int(time.time())
+            new_v_ts = override_v_ts if override_v_ts else int(time.time())
             
-            old_meta = self.vaultdb.get_meta(file_id, v_ts)
+            old_meta = self.vaultdb.get_meta(uuid, v_ts)
             if not old_meta:
                 raise FileNotFoundError("Original file metadata not found")
                 
             safe_path = self.vaultdb.assign_name(new_virtual_path)
             
-            self.vaultdb.delete_file(file_id, v_ts, new_v_ts)
+            self.vaultdb.delete_file(uuid, v_ts, new_v_ts)
             
             meta_dict = {
                 "size_bytes": old_meta["size_bytes"],
                 "created_at": old_meta["created_at"],
                 "is_active": True
             }
-            self.vaultdb.inmo_file(file_id, new_v_ts, safe_path, meta_dict)
+            self.vaultdb.inmo_file(uuid, new_v_ts, safe_path, meta_dict)
             
-            chunks = self.hashmap.get_meta(file_id, v_ts)
-            self.hashmap.add_file(file_id, new_v_ts, chunks)
+            chunks = self.hashmap.get_meta(uuid, v_ts)
+            self.hashmap.add_file(uuid, new_v_ts, chunks)
             
-            self.ledger.append_event(file_id, new_v_ts, self.ledger.ACTION_RENAME)
+            self.ledger.append_event(uuid, new_v_ts, self.ledger.ACTION_RENAME)
             self.sync_map_to_disc()
+
+    def ingest_network_payload(self, tmp_filepath: str, virtual_filepath: str, uuid: bytes, remote_v_ts: int, local_v_ts: int,  incoming_hashmap: list, created_at: int = None, is_conflict: bool = False):
+        try:
+            with self.io_lock:
+                filesize = os.path.getsize(tmp_filepath)
+                chunk_metadata = []
+                
+                # 1. Read already-encrypted chunks from tmp file and append with VaultIO
+                with open(tmp_filepath, 'rb') as tmp_file:
+                    for chunk in incoming_hashmap:
+                        tmp_file.seek(chunk["start"])
+                        chunk_size = chunk["end"] - chunk["start"]
+                        ciphertext = tmp_file.read(chunk_size)
+                        
+                        start_byte = self.vaultio.get_eof()
+                        end_byte = start_byte + len(ciphertext)
+                        
+                        self.vaultio.append_cargo(ciphertext)
+                        
+                        chunk_metadata.append({
+                            "iv": chunk["iv"],
+                            "start": start_byte,
+                            "end": end_byte
+                        })
+                
+                # 2. Update DB & Hashmap
+                if local_v_ts > 0:
+                    action = self.ledger.ACTION_EDIT
+                    # Using existing VaultManager logic to deprecate the old version
+                    old_meta = self.vaultdb.get_meta(uuid, local_v_ts)
+                    original_created_at = old_meta["created_at"] if old_meta else (created_at or remote_v_ts)
+                    self.vaultdb.delete_file(uuid, local_v_ts, remote_v_ts)
+                else:
+                    action = self.ledger.ACTION_INGEST
+                    original_created_at = created_at or remote_v_ts
+
+                self.hashmap.add_file(uuid, remote_v_ts, chunk_metadata)
+                
+                meta_dict = {
+                    "size_bytes": filesize,
+                    "created_at": original_created_at, #Remember to fix this this should be immutable file creation date
+                    "is_active": True
+                }
+                
+                self.vaultdb.inmo_file(uuid, remote_v_ts, virtual_filepath, meta_dict)
+                self.ledger.append_event(uuid, remote_v_ts, action)
+                self.sync_map_to_disc()
+
+        finally:
+            if os.path.exists(tmp_filepath):
+                try:
+                    os.remove(tmp_filepath)
+                except OSError:
+                    pass
     
     # Category 3 : Extraction (Stream, Preview, Restore)
     
@@ -259,17 +313,17 @@ class VaultManager:
         plaintext = local_aesgcm.decrypt_cipherstream(iv, ciphertext)
         return plaintext
 
-    def stream_file(self, file_id: bytes, v_ts: int):
-        chunk_array = self.hashmap.get_meta(file_id, v_ts)
+    def stream_file(self, uuid: bytes, v_ts: int):
+        chunk_array = self.hashmap.get_meta(uuid, v_ts)
         if not chunk_array:
-            raise FileNotFoundError(f"File ID {file_id.hex()} at {v_ts} not found in your hashmap")
+            raise FileNotFoundError(f"File ID {uuid.hex()} at {v_ts} not found in your hashmap")
             
         with concurrent.futures.ThreadPoolExecutor() as executor:
             for plaintext_chunk in executor.map(self._worker_decrypt, chunk_array):
                 yield plaintext_chunk
 
-    def preview_file(self, file_id: bytes, v_ts: int):
-        meta = self.vaultdb.get_meta(file_id, v_ts)
+    def preview_file(self, uuid: bytes, v_ts: int):
+        meta = self.vaultdb.get_meta(uuid, v_ts)
         if not meta:
             raise FileNotFoundError("Metadata missing for requested preview")
         
@@ -277,14 +331,14 @@ class VaultManager:
         self.ghostfile = GhostFileIO()
         ghost_path = self.ghostfile.create_ghost_path(virtual_path)
         
-        for plaintext_chunk in self.stream_file(file_id, v_ts):
+        for plaintext_chunk in self.stream_file(uuid, v_ts):
             self.ghostfile.write_decrypted_chunk(ghost_path, plaintext_chunk)
         self.ghostfile.launch_file(ghost_path)
 
-    def restore_version(self, file_id: bytes, active_v_ts: int, archived_v_ts: int):
+    def restore_version(self, uuid: bytes, active_v_ts: int, archived_v_ts: int):
         with self.io_lock:
             new_v_ts = int(time.time())
-            archived_meta = self.vaultdb.get_meta(file_id, archived_v_ts)
+            archived_meta = self.vaultdb.get_meta(uuid, archived_v_ts)
             if not archived_meta:
                 raise FileNotFoundError("Archived file UUID/timestamp does not exist")
                 
@@ -292,16 +346,16 @@ class VaultManager:
             safe_path = self.vaultdb.assign_name(original_virtual_path)
 
             if active_v_ts:
-                self.vaultdb.delete_file(file_id, active_v_ts, new_v_ts)
+                self.vaultdb.delete_file(uuid, active_v_ts, new_v_ts)
             
             meta_dict = {
                 "size_bytes": archived_meta['size_bytes'],
                 "created_at": archived_meta['created_at'], 
                 "is_active": True
             }
-            self.vaultdb.inmo_file(file_id, new_v_ts, safe_path, meta_dict)
+            self.vaultdb.inmo_file(uuid, new_v_ts, safe_path, meta_dict)
             
-            archived_chunks = self.hashmap.get_meta(file_id, archived_v_ts)
+            archived_chunks = self.hashmap.get_meta(uuid, archived_v_ts)
             new_chunks = []
             local_aesgcm = AesGcm(self.dek)
             
@@ -324,23 +378,23 @@ class VaultManager:
                 
                 pt[:] = b'\x00' * len(pt)
             
-            self.hashmap.add_file(file_id, new_v_ts, new_chunks)
-            self.ledger.append_event(file_id, new_v_ts, self.ledger.ACTION_EDIT)
+            self.hashmap.add_file(uuid, new_v_ts, new_chunks)
+            self.ledger.append_event(uuid, new_v_ts, self.ledger.ACTION_EDIT)
         
             self.sync_map_to_disc()
             
             return new_v_ts
 
-    def reingest_version(self, file_id: bytes, archived_v_ts: int):
+    def reingest_version(self, uuid: bytes, archived_v_ts: int):
         with self.io_lock:
-            archived_meta = self.vaultdb.get_meta(file_id, archived_v_ts)
+            archived_meta = self.vaultdb.get_meta(uuid, archived_v_ts)
             if not archived_meta:
                 raise FileNotFoundError("Archived file UUID/timestamp does not exist")
                 
             original_virtual_path = archived_meta['virtual_path'].split('.del_')[0]
             safe_path = self.vaultdb.assign_name(original_virtual_path)
 
-            archived_chunks = self.hashmap.get_meta(file_id, archived_v_ts)
+            archived_chunks = self.hashmap.get_meta(uuid, archived_v_ts)
             local_aesgcm = AesGcm(self.dek)
             
             restored_payload = bytearray()
@@ -349,7 +403,16 @@ class VaultManager:
                 old_ct = self.vaultio.read_cargo(chunk['start'], chunk['end'])
                 pt = local_aesgcm.decrypt_cipherstream(chunk['iv'], old_ct)
                 restored_payload.extend(pt)
+
+            fd, temp_path = tempfile.mkstemp()
+            with os.fdopen(fd, 'wb') as f:
+                f.write(restored_payload)
                 
-            self.ingest_file(safe_path, restored_payload)
-            
+            self.ingest_file(
+                os_filepath=temp_path, 
+                virtual_filepath=safe_path, 
+                existing_uuid=uuid, 
+                existing_v_ts=archived_v_ts
+            )
+            os.remove(temp_path)
             restored_payload[:] = b'\x00' * len(restored_payload)
