@@ -9,6 +9,7 @@ class DesktopDiscover(ServiceListener):
         self.zc = Zeroconf()
         self.discovered_vaults = {}
         self.service_type = "_securevault._tcp.local."
+        self.broadcasting_info = None
     
     @staticmethod
     def get_local_ipv4():
@@ -28,7 +29,10 @@ class DesktopDiscover(ServiceListener):
 
         sha_object = hashlib.sha3_256(dsa_pub_key)
         hash_dsa_pubk = sha_object.hexdigest()
-        
+
+        # --- DEBUG 1: SERVER BROADCAST ---
+        print(f"\n[DEBUG - SERVER] Generating mDNS Hash from Identity Key...")
+        print(f"[DEBUG - SERVER] Hash string being broadcasted: {hash_dsa_pubk}")
         
         LOCAL_IP = self.get_local_ipv4()
         info = ServiceInfo(
@@ -36,7 +40,7 @@ class DesktopDiscover(ServiceListener):
             name = f"{BROADCASTER_DEVICE}.{self.service_type}",
             addresses = [socket.inet_aton(LOCAL_IP)],
             port = 65432,
-            properties = {"ML-DSA-HASH" : hash_dsa_pubk},
+            properties = {b"ML-DSA-HASH" : hash_dsa_pubk.encode()},
             server = f"{BROADCASTER_DEVICE}.local."
         )
         
@@ -53,7 +57,7 @@ class DesktopDiscover(ServiceListener):
         info = zc.get_service_info(type_,name)
         if info and info.addresses:
             ip_address = socket.inet_ntoa(info.addresses[0])
-            dsa_hash = info.properties.get("ML-DSA-HASH", b"").decode()
+            dsa_hash = info.properties.get(b"ML-DSA-HASH", b"").decode()
 
             self.discovered_vaults[name] = {
                 "ip" : ip_address,

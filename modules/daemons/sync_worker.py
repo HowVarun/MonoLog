@@ -38,7 +38,10 @@ class SyncWorker:
         self.server_socket = None
         self._listener = None 
         self._thread_pool = concurrent.futures.ThreadPoolExecutor(5)
-        
+
+        #Pairing states
+        self.ui_request_pin_cb = None
+        self.ui_display_pin_cb = None
     #==========================================================
     @staticmethod
     def get_device_identity():
@@ -92,6 +95,42 @@ class SyncWorker:
             pass
 
         return device_name, device_type
+
+    #==========================================================
+    #pairing ui and cli routing
+    def _request_pin(self, peer_name: str) -> str:
+        """Attempts UI callback first, falls back to CLI."""
+        if self.ui_request_pin_cb:
+            try:
+                pin = self.ui_request_pin_cb(peer_name)
+                if pin: return pin
+            except Exception as e:
+                print(f"\n[-] UI Pin Request Failed: {e}. Falling back to CLI.")
+        
+        return self._cli_request_pin(peer_name)
+
+    def _cli_request_pin(self, peer_name: str) -> str:
+        return input(f"\n[?] Enter the 6-digit PIN displayed on [{peer_name}]'s screen: ").strip()
+
+    def _display_pin(self, peer_name: str, pin: str):
+        """Attempts UI callback first, falls back to CLI."""
+        if self.ui_display_pin_cb:
+            try:
+                self.ui_display_pin_cb(peer_name, pin)
+                return
+            except Exception as e:
+                print(f"\n[-] UI Pin Display Failed: {e}. Falling back to CLI.")
+                
+        self._cli_display_pin(peer_name, pin)
+
+    def _cli_display_pin(self, peer_name: str, pin: str):
+        print(f"\n" + "="*38)
+        print(f" 🔐 SECUREVAULT PAIRING REQUEST")
+        print(f" Peer: {peer_name}")
+        print(f" PIN:  {pin}")
+        print("="*38)
+        print("[*] Waiting for peer to enter this PIN...")
+    
 
     #==========================================================
     def _opcode_check(self, received_msg: tuple, expected_opcode: bytes, transport: SecureNetworkTransport, fail_opcode: bytes = Opcodes.BYE_FORCE) -> bytes:
@@ -289,7 +328,7 @@ class SyncWorker:
             transport.send_message(Opcodes.DEVC_ID, json.dumps(self_devc_meta).encode('utf-8')) 
 
             # Request Pin out-of-band on Alice's side (To be replaced by UI Thread-Event later)
-            sas_pin = input(f"Enter the 6-digit PIN displayed on Bob's screen: ").strip()
+            sas_pin = sas_pin = self._request_pin(peer_name)
             
             if hashing.verify_pass(sas_pin, self_key, peer_key):
                 transport.send_message(Opcodes.AUTH_PASS)
@@ -343,10 +382,7 @@ class SyncWorker:
                 raise SecurityError("Malformed Metadata payload JSON")
 
             PIN = SasPass.derive_pass(peer_key, self_key)
-            print(f"\n======================================")
-            print(f"     SECUREVAULT PAIRING PIN          ")
-            print(f"     PIN: {PIN}                       ")
-            print(f"======================================\n")
+            self._display_pin(peer_name, PIN)
             
             opcode, _ = transport.receive_message(timeout=60.0) # Allow up to 1 minute for Alice's input
             

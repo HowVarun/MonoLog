@@ -161,6 +161,7 @@ def vault_menu(vault_path):
     print("8. Rotate Master Encryption Key")
     print("9. Change Vault Password")
     print("10. Lock & Close Vault")
+    print("11. Network Sync & Pairing")
     return input("Select an option: ")
 
 def check_mem_state(manager):
@@ -356,6 +357,77 @@ def run_cli():
                 input("\n[*] Vault locked. RAM shredded. Ledger encrypted. Press Enter.")
                 manager = None
                 active_vault_path = ""
+
+            elif choice == '11':
+                from modules.daemons import SyncWorker, TaSkewer
+                
+                if not hasattr(manager, 'skewer'):
+                    manager.skewer = TaSkewer(manager)
+                    
+                worker = SyncWorker(manager)
+                
+                clear_screen()
+                print("\n" + "="*40 + "\n 🌐 NETWORK SYNC ENGINE\n" + "="*40)
+                print(f"Local Identity: {worker.local_name} ({worker.local_type})")
+                
+                # This automatically boots the mDNS broadcast and the socket listener
+                worker.start()
+                print("[+] Vault Listener & mDNS Broadcast Active.")
+                
+                print("\n1. Wait for incoming connection (Server)")
+                print("2. Scan Network for Peers (Client)")
+                print("3. Return to Main Menu")
+                net_choice = input("\nSelect option: ")
+                
+                if net_choice == '1':
+                    print("\n[*] Waiting for peer connections... (Press Ctrl+C to abort)")
+                    try:
+                        while True: time.sleep(1)
+                    except KeyboardInterrupt:
+                        worker.stop()
+                        
+                elif net_choice == '2':
+                    print("\n[*] Scanning local network for SecureVault peers via mDNS (5 seconds)...")
+                    
+                    # 1. Call your actual discovery method!
+                    peers = worker.discovery.scan_for_devices(scan_time_seconds=5) 
+                    
+                    if not peers:
+                        input("\n[-] No peers found on the local network. Press Enter.")
+                        worker.stop()
+                        continue
+                        
+                    print("\n[+] Discovered Peers:")
+                    peer_list = list(peers.items()) 
+                    
+                    # 2. Parse your specific dictionary structure
+                    for idx, (raw_name, data) in enumerate(peer_list, 1):
+                        display_name = raw_name.replace("._securevault._tcp.local.", "")
+                        short_hash = data['ML-DSA-HASH'][:8] if data['ML-DSA-HASH'] else "EMPTY!"
+                        print(f"  {idx}. {display_name} ({data['ip']}:{data['port']}) [Hash: {short_hash}...]")
+                    print("  0. Cancel")
+                    
+                    p_choice = input("\nSelect a peer to connect to: ")
+                    if p_choice == '0' or not p_choice.isdigit() or int(p_choice) < 1 or int(p_choice) > len(peer_list):
+                        worker.stop()
+                        continue
+                        
+                    # 3. Extract the routing and cryptographic data
+                    selected_name, selected_data = peer_list[int(p_choice) - 1]
+                    target_ip = selected_data["ip"]
+                    target_port = selected_data["port"]
+                    
+                    # Your zeroconf decoded the hash to a string, so we encode it back 
+                    # to bytes for the cryptographic engine to compare!
+                    expected_mdns_hash = selected_data["ML-DSA-HASH"].encode('utf-8')
+                    
+                    print(f"\n[*] Initiating zero-trust connection to {target_ip}:{target_port}...")
+                    
+                    # 4. Fire the connection!
+                    worker._route_outbound_connection(target_ip, target_port, expected_mdns_hash)
+                    
+                    input("\n[+] Sync process ended. Press Enter to continue.")
+                    worker.stop()
 
 if __name__ == "__main__":
     run_cli()

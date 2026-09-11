@@ -1,0 +1,8 @@
+liboqs-python
+portalocker
+cryptography
+msgpack
+zeroconf
+qrcode
+keyring
+uuid6
