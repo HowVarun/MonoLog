@@ -32,7 +32,7 @@ class PrivateKeyManager:
 
             # Generate new key
             identity = MLDSA()
-            pvt_key_bytes = identity.generate_key(type="pvt")
+            pvt_key_bytes = bytearray(identity.generate_key(key_type="pvt"))
             encoded_new_key = base64.b64encode(pvt_key_bytes).decode('utf-8')
             
             # Slice into ultra-safe 500-character micro-chunks

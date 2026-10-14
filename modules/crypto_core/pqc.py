@@ -11,7 +11,7 @@ class MLDSA:
             self.signature = Signature(self.algorithm, secret_key)
             self.has_key = True
     
-    def generate_key(self, type : str):
+    def generate_key(self, key_type : str):
         if not self.has_key:
             pub_key = bytearray(self.signature.generate_keypair())
             _pvt_key = bytearray(self.signature.export_secret_key())
@@ -20,12 +20,12 @@ class MLDSA:
             _pvt_key = bytearray(self.signature.export_secret_key())
             pub_key = bytearray(_pvt_key[-2592:])
 
-        if type == "pub":
+        if key_type == "pub":
             _pvt_key[:] = b'\x00' * len(_pvt_key)
-            return pub_key
-        elif type == "pvt":
+            return bytes(pub_key)
+        elif key_type == "pvt":
             pub_key[:] = b'\x00' * len(pub_key)
-            return _pvt_key
+            return bytes(_pvt_key)
         else:
             raise ValueError("Did not receive valid type")
     

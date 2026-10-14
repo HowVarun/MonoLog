@@ -4,6 +4,7 @@ import struct
 import traceback
 from modules.orchestrator import VaultManager
 from modules.orchestrator import VaultDynamicManager
+from modules.daemons import SyncWorker, TaSkewer
 
 def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -359,7 +360,6 @@ def run_cli():
                 active_vault_path = ""
 
             elif choice == '11':
-                from modules.daemons import SyncWorker, TaSkewer
                 
                 if not hasattr(manager, 'skewer'):
                     manager.skewer = TaSkewer(manager)
