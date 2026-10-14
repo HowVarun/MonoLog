@@ -4,7 +4,8 @@ import struct
 import traceback
 from modules.orchestrator import VaultManager
 from modules.orchestrator import VaultDynamicManager
-from modules.daemons import SyncWorker, TaSkewer
+from modules.daemons import SyncWorker, TaSkewer 
+from modules.crypto_core import hashing
 
 def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -417,13 +418,13 @@ def run_cli():
                     target_ip = selected_data["ip"]
                     target_port = selected_data["port"]
                     
-                    # Your zeroconf decoded the hash to a string, so we encode it back 
-                    # to bytes for the cryptographic engine to compare!
-                    expected_mdns_hash = selected_data["ML-DSA-HASH"].encode('utf-8')
+                    # 4. FIX: Use the adapter to convert the Hex String back to 32 Raw Bytes!
+                    raw_hash_string = selected_data["ML-DSA-HASH"]
+                    expected_mdns_hash = hashing.hash_convert_bytes(raw_hash_string)
                     
                     print(f"\n[*] Initiating zero-trust connection to {target_ip}:{target_port}...")
                     
-                    # 4. Fire the connection!
+                    # 5. Fire the connection!
                     worker._route_outbound_connection(target_ip, target_port, expected_mdns_hash)
                     
                     input("\n[+] Sync process ended. Press Enter to continue.")
