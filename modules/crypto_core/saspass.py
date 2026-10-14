@@ -23,7 +23,7 @@ class SasPass:
     
     @staticmethod
     def verify_pass(PIN : str  ,*public_keys : bytes):
-        expected_pin = derive_pass(*public_keys)
+        expected_pin = SasPass.derive_pass(*public_keys)
         if expected_pin == PIN:
             return True
         else:
