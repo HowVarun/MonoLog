@@ -27,6 +27,7 @@ class SyncWorker:
         #identity
         self.pvt_key_mgr = PrivateKeyManager()
         self.my_identity = self.pvt_key_mgr.get_or_create_identity()
+        self.my_pub_key = bytes(self.my_identity.generate_key("pub"))
         self.peers = TrustedDevicesDatabase(self.dir)
         
         #network classes
@@ -160,9 +161,8 @@ class SyncWorker:
             return False
         else:
             self.peers.create_db()
-            identity = self.pvt_key_mgr.get_or_create_identity()
-            dsa_pub_key = identity.generate_key("pub")
-            self.discovery.broadcast_presence(dsa_pub_key)
+            self.peers.create_db()
+            self.discovery.broadcast_presence(self.my_pub_key)
 
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -203,7 +203,6 @@ class SyncWorker:
             peer_data = self.peers.is_device_trusted(peer_hash)
 
             if peer_data:
-                transport.send_message(Opcodes.TRUST_YES)
                 transport.send_message(Opcodes.TRUST_YES)
                 self._execute_sync_session(transport, peer_hash, is_client=False)
             else:
@@ -248,7 +247,7 @@ class SyncWorker:
             
     #===========================================================================================================================
     def _outbound_router(self, transport : SecureNetworkTransport, expected_mdns_hash : bytes):
-        pub_hash = hashing.hash_key(self.my_identity.generate_key("pub"))
+        pub_hash = hashing.hash_key(self.my_pub_key)
         
         is_known = self.peers.is_device_trusted(expected_mdns_hash)
 
@@ -311,9 +310,8 @@ class SyncWorker:
             print(f"[SERVER] Key Head: {self_key[:20].hex()}")
             print(f"[SERVER] Key Tail: {self_key[-20:].hex()}")
             print("="*40 + "\n")
-            
+
             peer_key = self._opcode_check(transport.receive_message(), Opcodes.DSA_PUB, transport, Opcodes.PUB_ERR)
-            self_key = self.my_identity.generate_key("pub")
             transport.send_message(Opcodes.DSA_PUB, self_key)
             
             if not hashing.hash_verify(peer_key, peer_hash):
@@ -340,7 +338,7 @@ class SyncWorker:
             # Request Pin out-of-band on Alice's side (To be replaced by UI Thread-Event later)
             sas_pin = sas_pin = self._request_pin(peer_name)
             
-            if hashing.verify_pass(sas_pin, self_key, peer_key):
+            if SasPass.verify_pass(sas_pin, self_key, peer_key):
                 transport.send_message(Opcodes.AUTH_PASS)
                 
                 opcode, _ = transport.receive_message()
@@ -366,7 +364,7 @@ class SyncWorker:
     #===========================================================================================================================
     def _execute_pairing_client(self, transport : SecureNetworkTransport, peer_hash):
         try:
-            self_key = self.my_identity.generate_key("pub")
+            self_key = self.my_pub_key
             transport.send_message(Opcodes.DSA_PUB, self_key)
             peer_key = self._opcode_check(transport.receive_message(), Opcodes.DSA_PUB, transport, Opcodes.PUB_ERR)
 
@@ -683,3 +681,4 @@ class SyncWorker:
             except Exception as e:
                 print(f"[-] Error serving request for {req_uuid.hex()[:8]}: {e}")
                 transport.send_message(Opcodes.SYNC_ERR)
+                

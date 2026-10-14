@@ -23,7 +23,7 @@ class PrivateKeyManager:
                 try:
                     encoded_pvt_key = "".join(parts)
                     pvt_key_bytes = bytearray(base64.b64decode(encoded_pvt_key.encode('utf-8')))
-                    identity = MLDSA(secret_key=pvt_key_bytes)
+                    identity = MLDSA(secret_key=bytes(pvt_key_bytes))
                     pvt_key_bytes[:] = b'\x00' * len(pvt_key_bytes)
                     return identity
                 except Exception:
