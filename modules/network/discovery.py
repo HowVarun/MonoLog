@@ -32,7 +32,7 @@ class DesktopDiscover(ServiceListener):
         mdns_safe_hash_str = hashing.hash_convert_str(raw_hash)
 
         print(f"\n[DEBUG - SERVER] Generating mDNS Hash from Identity Key...")
-        print(f"[DEBUG - SERVER] Hash string being broadcasted: {mdns_safe_hash.decode('utf-8')}")
+        print(f"[DEBUG - SERVER] Hash string being broadcasted: {mdns_safe_hash_str.encode('utf-8')}")
         
         # 2. Bind to self.broadcasting_info so cleanup() works perfectly
         self.broadcasting_info = ServiceInfo(

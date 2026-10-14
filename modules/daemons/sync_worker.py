@@ -302,6 +302,16 @@ class SyncWorker:
     #===========================================================================================================================
     def _execute_pairing_server(self, transport : SecureNetworkTransport, peer_hash):
         try:
+
+            #DEBUGGER  : 
+            self_key = self.my_pub_key 
+            
+            print("\n" + "="*40)
+            print(f"[SERVER] Sending Key to Client...")
+            print(f"[SERVER] Key Head: {self_key[:20].hex()}")
+            print(f"[SERVER] Key Tail: {self_key[-20:].hex()}")
+            print("="*40 + "\n")
+            
             peer_key = self._opcode_check(transport.receive_message(), Opcodes.DSA_PUB, transport, Opcodes.PUB_ERR)
             self_key = self.my_identity.generate_key("pub")
             transport.send_message(Opcodes.DSA_PUB, self_key)
