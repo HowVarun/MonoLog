@@ -40,7 +40,7 @@ class TrustedDevicesDatabase:
     def is_device_trusted(self, ml_dsa_hash: str) -> dict | None:
         try:
             with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row 
+                conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 QUERY = '''SELECT * FROM trusted_devices WHERE ml_dsa_hash = ?'''
                 cursor.execute(QUERY, (ml_dsa_hash,))

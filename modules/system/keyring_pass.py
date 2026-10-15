@@ -1,11 +1,15 @@
 import base64
 import keyring
+import os
+
 from keyring.errors import KeyringError
 from modules.crypto_core.pqc import MLDSA
 
 class PrivateKeyManager:
     def __init__(self):
-        self.service_name = "SecureVault_Device_Identity"
+        node_id = os.getenv("SV_NODE", "1")
+        suffix = f"_{node_id}" if node_id != "1" else ""
+        self.service_name = f"SecureVault_Device_Identity{suffix}"
         self.account_base = "mldsa_pvt_part"
 
     def get_or_create_identity(self) -> MLDSA:
@@ -58,3 +62,4 @@ class PrivateKeyManager:
             return True
         except Exception:
             return False
+        

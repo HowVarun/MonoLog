@@ -14,15 +14,25 @@ from modules.system import Opcodes, LocalOpcodes
 from modules.network import DesktopDiscover, SecureNetworkTransport, TrustedDevicesDatabase
 from modules.system import PrivateKeyManager
 from modules.crypto_core import hashing, SasPass
+from modules.daemons import TaSkewer
 
 class SecurityError(Exception):
     pass
 
 class SyncWorker:
-    def __init__(self, vault_manager  ,port: int = 65432, storage_dir=None):
-        self.port = port 
+    def __init__(self, vault_manager ,port: int = 65432, storage_dir=None):
+        #debugging and testing simultaneous machine operation
+        node_id = int(os.getenv("SV_NODE", "1"))
+        self.port = port + (node_id -1)
+        if node_id > 1:
+            default_dir = os.path.join(tempfile.gettempdir(), f"sv_node_{node_id}")
+            os.makedirs(default_dir, exist_ok=True)
+        else:
+            default_dir = tempfile.gettempdir()
+
         self.dir = storage_dir if storage_dir else tempfile.gettempdir()
         self.vault_manager = vault_manager
+        self.skewer = getattr(self.vault_manager, 'skewer', None) or TaSkewer(self.vault_manager)
 
         #identity
         self.pvt_key_mgr = PrivateKeyManager()
@@ -43,6 +53,8 @@ class SyncWorker:
         #Pairing states
         self.ui_request_pin_cb = None
         self.ui_display_pin_cb = None
+
+        
     #==========================================================
     @staticmethod
     def get_device_identity():
@@ -161,8 +173,7 @@ class SyncWorker:
             return False
         else:
             self.peers.create_db()
-            self.peers.create_db()
-            self.discovery.broadcast_presence(self.my_pub_key)
+            self.discovery.broadcast_presence(self.my_pub_key, self.port)
 
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -347,9 +358,7 @@ class SyncWorker:
                         ml_dsa_hash=peer_hash,
                         device_name=peer_name,
                         device_type=peer_type,
-                        ml_dsa_pub_key=peer_key,
-                        added_timestamp=time.time(),
-                        last_seen=time.time()
+                        ml_dsa_pub_key=peer_key
                     )
                     transport.send_message(Opcodes.BYE_GRACE)
                 else:
@@ -399,9 +408,7 @@ class SyncWorker:
                     ml_dsa_hash=peer_hash,
                     device_name=peer_name,
                     device_type=peer_type,
-                    ml_dsa_pub_key=peer_key,
-                    added_timestamp=time.time(),
-                    last_seen=time.time()
+                    ml_dsa_pub_key=peer_key
                 )
                 transport.send_message(Opcodes.AUTH_PASS)
                 self._opcode_check(transport.receive_message(), Opcodes.BYE_GRACE, transport)
@@ -417,7 +424,6 @@ class SyncWorker:
             transport.send_message(Opcodes.BYE_FORCE)
             return
 
-        import msgpack
         self.ledger = self.vault_manager.ledger
 
         try:
@@ -608,8 +614,7 @@ class SyncWorker:
             for record in local_full_ledger:
                 if record[0] == req_uuid:  
                     l_v_ts = record[1]    
-                    l_action = record[2]   
-                    break                  
+                    l_action = record[2]                
 
             if not l_action:
                 transport.send_message(Opcodes.SYNC_ERR)

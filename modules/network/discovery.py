@@ -10,6 +10,8 @@ class DesktopDiscover(ServiceListener):
         self.discovered_vaults = {}
         self.service_type = "_securevault._tcp.local."
         self.broadcasting_info = None
+        self.browser = None
+        self.my_port = None
     
     @staticmethod
     def get_local_ipv4():
@@ -24,10 +26,11 @@ class DesktopDiscover(ServiceListener):
         return ip
     
     def broadcast_presence(self, dsa_pub_key: bytes, port: int = 65432):
-        BROADCASTER_DEVICE = socket.gethostname()
+        self.my_port = port
+        BROADCASTER_DEVICE = f"{socket.gethostname()}-{port}"
         LOCAL_IP = self.get_local_ipv4()
 
-        # 1. Use the unified hashing module
+        
         raw_hash = hashing.hash_key(dsa_pub_key)
         mdns_safe_hash_str = hashing.hash_convert_str(raw_hash)
 
@@ -58,8 +61,8 @@ class DesktopDiscover(ServiceListener):
         if info:
             discovered_ip = socket.inet_ntoa(info.addresses[0])
             
-            # FIX 3: Prevent the self-discovery loop! Ignore our own broadcast.
-            if discovered_ip == self.get_local_ipv4():
+            
+            if discovered_ip == self.get_local_ipv4() and info.port == self.my_port:
                 return
             
             # Extract the hash safely, defaulting to empty string if missing
