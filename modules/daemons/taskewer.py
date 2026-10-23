@@ -100,8 +100,7 @@ class TaSkewer:
                 uuid=args["uuid"],
                 v_ts=args.get("local_v_ts", 0),
                 new_virtual_path=args["new_virtual_path"],
-                override_v_ts=args["remote_v_ts"],
-                created_at =args.get("created_at")
+                override_v_ts=args["remote_v_ts"]
             )
 
         elif opcode == LocalOpcodes.NET_DATA:

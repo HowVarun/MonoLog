@@ -47,15 +47,28 @@ class SyncLedger:
         
         self.ledger = [row for row in ledger
                        if row[3] == 0 or (current_time - row[3]) <= self.retention]
+
+    def _flush(self):
+            if self.ledger is None:
+                return
+            pt = msgpack.packb(self.ledger, use_bin_type=True)
+            iv, ciphertext = AesGcm(self.dek).encrypt_cipherstream(pt)
             
+            tmp_path = self._filepath + ".tmp"
+            with open(tmp_path, 'wb') as f:
+                f.write(iv + ciphertext)
+            os.replace(tmp_path, self._filepath)
+           
     def append_event(self, uuid: bytes, v_ts: int, action: int):
         self.ledger.append([uuid, v_ts, action, 0])
+        self._flush()
     
     def mark_synced(self, uuid: bytes, highest_v_ts: int):
         sync_time = int(time.time())
         for record in self.ledger:
             if record[0] == uuid and record[1] <= highest_v_ts and record[3] == 0:
                 record[3] = sync_time
+        self._flush()
     
     def _action_manager(self, prev_action: int, curr_action: int) -> int:
         if curr_action == self.ACTION_DELETE:
@@ -96,17 +109,9 @@ class SyncLedger:
         
         return [(record[0], record[1], record[2]) for record in self.ledger]
     
-    
+
     def close(self):
-        pt = msgpack.packb(self.ledger, use_bin_type=True)
-        iv, ciphertext = AesGcm(self.dek).encrypt_cipherstream(pt)
-        
-        # Write to temporary file first to prevent corruption during sudden power loss
-        tmp_path = self._filepath + ".tmp"
-        with open(tmp_path, 'wb') as f:
-            f.write(iv + ciphertext)
-        os.replace(tmp_path, self._filepath)
-        
+        self._flush()
         self.ledger.clear()
         self.ledger = None
         

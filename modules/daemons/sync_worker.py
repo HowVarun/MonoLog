@@ -14,7 +14,6 @@ from modules.system import Opcodes, LocalOpcodes
 from modules.network import DesktopDiscover, SecureNetworkTransport, TrustedDevicesDatabase
 from modules.system import PrivateKeyManager
 from modules.crypto_core import hashing, SasPass
-from modules.daemons import TaSkewer
 
 class SecurityError(Exception):
     pass
@@ -32,7 +31,7 @@ class SyncWorker:
 
         self.dir = storage_dir if storage_dir else tempfile.gettempdir()
         self.vault_manager = vault_manager
-        self.skewer = getattr(self.vault_manager, 'skewer', None) or TaSkewer(self.vault_manager)
+        self.skewer = getattr(self.vault_manager, 'skewer', None)
 
         #identity
         self.pvt_key_mgr = PrivateKeyManager()
@@ -607,21 +606,20 @@ class SyncWorker:
             req_uuid = payload
             
             # Fetch current local state for this UUID
-            local_full_ledger = self.ledger.get_ledger()
-            l_v_ts = 0
-            l_action = None
-            
-            for record in local_full_ledger:
-                if record[0] == req_uuid:  
-                    l_v_ts = record[1]    
-                    l_action = record[2]                
-
-            if not l_action:
+            unsynced_map = self.ledger.get_unsynced_payload()
+            if req_uuid not in unsynced_map:
                 transport.send_message(Opcodes.SYNC_ERR)
                 continue
+                
+            l_v_ts, l_action = unsynced_map[req_uuid]
 
             try:
-                # METADATA UPDATES (Renames)
+                #DEBUGGG
+                meta = self.vault_manager.vaultdb.get_meta(req_uuid, l_v_ts)
+                print(f"[DEBUG SERVER] UUID: {req_uuid.hex()[:8]} | v_ts: {l_v_ts} | action: {l_action} | meta: {meta}")
+                print(f"[DEBUG SERVER] Complete DB Rows: {len(self.vault_manager.vaultdb.get_complete_meta())} | Map Keys: {len(self.vault_manager.hashmap.get_all_file_ids())}")
+                #DEBUGGG
+
                 if l_action == self.ledger.ACTION_RENAME:
                     meta = self.vault_manager.vaultdb.get_meta(req_uuid, l_v_ts)
                     header_dict = {
@@ -680,7 +678,7 @@ class SyncWorker:
                         print(f"[-] Peer aborted chunk transfer for {req_uuid.hex()[:8]}")
                         
                 else:
-                    # If it's a DELETE, the peer shouldn't be asking for it!
+                    #if its a delete peer shouldn't be asking for it
                     transport.send_message(Opcodes.SYNC_ERR)
                     
             except Exception as e:
