@@ -15,14 +15,21 @@ class VaultDatabase:
         """Unpacks the 24-byte key into (uuid_bytes, v_ts_int)."""
         return struct.unpack('>16sQ', fileid)
 
+    @staticmethod
+    def _normalize_paths(virtual_path: str) -> tuple:
+        virtual_path = "/" + virtual_path.replace("\\", "/").lstrip("/")
+        file_name = os.path.basename(virtual_path)
+        dir_name = os.path.dirname(virtual_path)
+        parent_folder = "/" if dir_name == "/" else dir_name + "/"
+        return virtual_path, file_name, parent_folder
+
     def db_map_sync(self, vault_map_dict: dict):
         info = []
         for _fileid, meta_data in vault_map_dict.items():
             uuid, v_ts = self.uuid_time(_fileid)
             
-            virtual_path = meta_data.get("virtual_path")
-            file_name = os.path.basename(virtual_path)
-            parent_folder = os.path.dirname(virtual_path) + '/'
+            raw_path = meta_data.get("virtual_path", "")
+            virtual_path, file_name, parent_folder = self._normalize_paths(raw_path)
             info.append((
                 uuid, 
                 v_ts, 
@@ -81,8 +88,7 @@ class VaultDatabase:
 
     def inmo_file(self, uuid: bytes, v_ts: int, virtual_path: str, meta_data: dict):
         '''Insert or Modify file metadata'''
-        file_name = os.path.basename(virtual_path)
-        relative_dir = os.path.dirname(virtual_path) + '/'
+        virtual_path, file_name, relative_dir = self._normalize_paths(virtual_path)
 
         params = (uuid, v_ts, file_name, relative_dir, virtual_path, meta_data.get("size_bytes"), meta_data.get("created_at"), meta_data.get("is_active"))
 

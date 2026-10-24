@@ -31,6 +31,7 @@ class Opcodes:
     DEVC_RM   = b"I5003"  # I have deleted/not found you in my trusted devices. Remove me.
     TRUST_RM  = b"I5004"  # I have successfully deleted your connection as per reqest
     TRUST_NF  = b"I5005"  # I don't have you in my trusted devices
+    PAIR_FULL = B"I5006"  # I already have a sync partner, terminate pairing session
 
 
     # =========================================================================

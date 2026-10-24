@@ -13,7 +13,7 @@ import struct
 from modules.system import Opcodes, LocalOpcodes
 from modules.network import DesktopDiscover, SecureNetworkTransport, TrustedDevicesDatabase
 from modules.system import PrivateKeyManager
-from modules.crypto_core import hashing, SasPass
+from modules.crypto_core import hashing, SasPass, AesGcm
 
 class SecurityError(Exception):
     pass
@@ -29,7 +29,7 @@ class SyncWorker:
         else:
             default_dir = tempfile.gettempdir()
 
-        self.dir = storage_dir if storage_dir else tempfile.gettempdir()
+        self.dir = storage_dir if storage_dir else default_dir
         self.vault_manager = vault_manager
         self.skewer = getattr(self.vault_manager, 'skewer', None)
 
@@ -109,6 +109,14 @@ class SyncWorker:
         return device_name, device_type
 
     #==========================================================
+    @property
+    def vault_id(self) -> bytes:
+        if not self.vault_manager or not getattr(self.vault_manager, 'dek', None):
+            raise PermissionError("Vault must be unlocked first!")
+        digest = hashing.hash_key(b"MONOLOG_VAULT_ID:" + bytes(self.vault_manager.dek))
+        return b"SCAF" + digest[:28]
+
+    #==========================================================
     #pairing ui and cli routing
     def _request_pin(self, peer_name: str) -> str:
         """Attempts UI callback first, falls back to CLI."""
@@ -145,6 +153,7 @@ class SyncWorker:
     
 
     #==========================================================
+    #Helper functions
     def _opcode_check(self, received_msg: tuple, expected_opcode: bytes, transport: SecureNetworkTransport, fail_opcode: bytes = Opcodes.BYE_FORCE) -> bytes:
         opcode_recv, payload = received_msg
         
@@ -165,6 +174,24 @@ class SyncWorker:
             return True
         else:
             transport.send_message(Opcodes.ACK_FAIL)
+    def _generate_vault_proof(self) -> bytes:
+            iv, ct = AesGcm(self.vault_manager.dek).encrypt_cipherstream(self.vault_id)
+            return iv + ct
+    
+    def _verify_vault_proof(self, proof_bytes: bytes) -> bool:
+        try:
+            iv, ct = proof_bytes[:12], proof_bytes[12:]
+            pt = AesGcm(self.vault_manager.dek).decrypt_cipherstream(iv, ct)
+            return pt == self.vault_id and pt.startswith(b"SCAF")
+        except Exception:
+            return False
+
+    def _check_partner_slot(self, peer_hash: bytes, transport: SecureNetworkTransport = None):
+      partner = self.peers.get_vault_partner(self.vault_id)
+      if partner and partner["ml_dsa_hash"] != peer_hash:
+          if transport:
+              transport.send_message(Opcodes.PAIR_FULL) # Sends b"I5006"
+          raise SecurityError(f"Vault is already paired with {partner['device_name']}. Unpair it first!")
 
     #==========================================================
     def start(self):
@@ -210,33 +237,35 @@ class SyncWorker:
 
         #==============PROTOCOL ROUTING===============
         if opcode_received == Opcodes.TRUST_QRY:
-            peer_data = self.peers.is_device_trusted(peer_hash)
+            peer_data = self.peers.is_device_trusted(peer_hash, self.vault_id)
 
             if peer_data:
                 transport.send_message(Opcodes.TRUST_YES)
                 self._execute_sync_session(transport, peer_hash, is_client=False)
             else:
+                self._check_partner_slot(peer_hash, transport)
                 transport.send_message(Opcodes.DEVC_RM)
                 self._execute_pairing_server(transport, peer_hash)
 
         elif opcode_received == Opcodes.DSA_HASH:
-            peer_data = self.peers.is_device_trusted(peer_hash)
+            peer_data = self.peers.is_device_trusted(peer_hash, self.vault_id)
 
             if not peer_data:
+                self._check_partner_slot(peer_hash, transport)
                 transport.send_message(Opcodes.TRUST_NO)
                 self._execute_pairing_server(transport, peer_hash)
             elif peer_data:
                 transport.send_message(Opcodes.TRUST_YES)
                 recv_op, _ = transport.receive_message()
                 if recv_op == Opcodes.DEVC_RM:
-                    self.peers.remove_peer(peer_hash)
+                    self.peers.remove_peer(peer_hash, self.vault_id)
                     transport.send_message(Opcodes.TRUST_RM)
                     self._execute_pairing_server(transport, peer_hash)
             else:
                 raise SecurityError("Trusted Devices database compromised")
         
         elif opcode_received == Opcodes.DEVC_RM:
-            self.peers.remove_peer(peer_hash)
+            self.peers.remove_peer(peer_hash, self.vault_id)
             transport.send_message(Opcodes.TRUST_RM)
             self._execute_pairing_server(transport, peer_hash)
         else:
@@ -259,7 +288,7 @@ class SyncWorker:
     def _outbound_router(self, transport : SecureNetworkTransport, expected_mdns_hash : bytes):
         pub_hash = hashing.hash_key(self.my_pub_key)
         
-        is_known = self.peers.is_device_trusted(expected_mdns_hash)
+        is_known = self.peers.is_device_trusted(expected_mdns_hash, self.vault_id)
 
         #==========Routing Protocol=======================
         if is_known:
@@ -268,12 +297,13 @@ class SyncWorker:
             if opcode == Opcodes.TRUST_YES:
                 self._execute_sync_session(transport, expected_mdns_hash, is_client=True)
             elif opcode == Opcodes.DEVC_RM:
-                self.peers.remove_peer(expected_mdns_hash)
+                self.peers.remove_peer(expected_mdns_hash, self.vault_id)
                 transport.send_message(Opcodes.TRUST_RM)
                 self._execute_pairing_client(transport, expected_mdns_hash)
             else:
                 raise SecurityError("Invalid opcode at current stage")
         else:
+            self._check_partner_slot(expected_mdns_hash)
             transport.send_message(Opcodes.DSA_HASH, pub_hash)
             opcode, _ = transport.receive_message()
             if opcode == Opcodes.TRUST_NO:
@@ -285,6 +315,8 @@ class SyncWorker:
                     self._execute_pairing_client(transport, expected_mdns_hash)
                 else:
                     raise SecurityError("Secondary device not unpaired successfully!")
+            elif opcode == Opcodes.PAIR_FULL:
+                raise SecurityError("Server vault is already paired with another device!")
             else:
                 raise SecurityError("Invalid opcode at current stage")
         
@@ -334,6 +366,7 @@ class SyncWorker:
                 peer_meta = json.loads(peer_devc_meta_bytes.decode('utf-8'))
                 peer_name = peer_meta.get("device_name", "Unknown Device")
                 peer_type = peer_meta.get("device_type", "Unknown OS")
+                peer_proof_hex = peer_meta.get("vault_proof", "")
             except Exception:
                 transport.send_message(Opcodes.ID_ERR)
                 raise SecurityError("Malformed Metadata payload JSON")
@@ -341,12 +374,18 @@ class SyncWorker:
             self_devc_meta = {
                 "device_name": self.local_name,
                 "device_type": self.local_type,
-                "app_version": "1.0"
+                "app_version": "1.0",
+                "vault_proof": self._generate_vault_proof().hex()
             }
-            transport.send_message(Opcodes.DEVC_ID, json.dumps(self_devc_meta).encode('utf-8')) 
+            transport.send_message(Opcodes.DEVC_ID, json.dumps(self_devc_meta).encode('utf-8'))
 
+            # Verify Client holds the exact same unlocked .scaf DEK
+            if not self._verify_vault_proof(bytes.fromhex(peer_proof_hex)):
+                transport.send_message(Opcodes.ID_ERR)
+                raise SecurityError("Vault Proof Failed! Client has a different vault unlocked.")
+            
             # Request Pin out-of-band on Alice's side (To be replaced by UI Thread-Event later)
-            sas_pin = sas_pin = self._request_pin(peer_name)
+            sas_pin = self._request_pin(peer_name)
             
             if SasPass.verify_pass(sas_pin, self_key, peer_key):
                 transport.send_message(Opcodes.AUTH_PASS)
@@ -355,6 +394,7 @@ class SyncWorker:
                 if opcode == Opcodes.AUTH_PASS:
                     self.peers.add_trusted_device(
                         ml_dsa_hash=peer_hash,
+                        vault_id = self.vault_id,
                         device_name=peer_name,
                         device_type=peer_type,
                         ml_dsa_pub_key=peer_key
@@ -383,7 +423,8 @@ class SyncWorker:
             self_devc_meta = {
                 "device_name": self.local_name,
                 "device_type": self.local_type,
-                "app_version": "1.0"
+                "app_version": "1.0",
+                "vault_proof": self._generate_vault_proof().hex()
             }
             transport.send_message(Opcodes.DEVC_ID, json.dumps(self_devc_meta).encode('utf-8'))
             
@@ -393,10 +434,16 @@ class SyncWorker:
                 peer_meta = json.loads(peer_devc_meta_bytes.decode('utf-8'))
                 peer_name = peer_meta.get("device_name", "Unknown Device")
                 peer_type = peer_meta.get("device_type", "Unknown OS")
+                peer_proof_hex = peer_meta.get("vault_proof", "")
             except Exception:
                 transport.send_message(Opcodes.ID_ERR)
                 raise SecurityError("Malformed Metadata payload JSON")
 
+            # Verify Server holds the exact same unlocked .scaf DEK
+            if not self._verify_vault_proof(bytes.fromhex(peer_proof_hex)):
+                transport.send_message(Opcodes.ID_ERR)
+                raise SecurityError("Vault Proof Failed! Server has a different vault unlocked.")
+            
             PIN = SasPass.derive_pass(peer_key, self_key)
             self._display_pin(peer_name, PIN)
             
@@ -405,6 +452,7 @@ class SyncWorker:
             if opcode == Opcodes.AUTH_PASS:
                 self.peers.add_trusted_device(
                     ml_dsa_hash=peer_hash,
+                    vault_id = self.vault_id,
                     device_name=peer_name,
                     device_type=peer_type,
                     ml_dsa_pub_key=peer_key
@@ -428,11 +476,16 @@ class SyncWorker:
         try:
             # 1. Strict Linear Handshake
             if is_client:
-                transport.send_message(Opcodes.SYNCO)
-                self._opcode_check(transport.receive_message(), Opcodes.ACQ_OK, transport)
+                transport.send_message(Opcodes.SYNCO, self._generate_vault_proof())
+                peer_proof = self._opcode_check(transport.receive_message(), Opcodes.ACQ_OK, transport)
+                if not self._verify_vault_proof(peer_proof):
+                    raise SecurityError("Vault Proof Failed! Peer has a different vault open.")
             else:
-                self._opcode_check(transport.receive_message(), Opcodes.SYNCO, transport)
-                transport.send_message(Opcodes.ACQ_OK)
+                peer_proof = self._opcode_check(transport.receive_message(), Opcodes.SYNCO, transport)
+                if not self._verify_vault_proof(peer_proof):
+                    transport.send_message(Opcodes.BYE_FORCE)
+                    raise SecurityError("Vault Proof Failed! Client has a different vault open.")
+                transport.send_message(Opcodes.ACQ_OK, self._generate_vault_proof())
 
             # 2. Swap Unsynced Ledgers
             local_unsynced = self.ledger.get_unsynced_payload()
