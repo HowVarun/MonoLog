@@ -14,7 +14,7 @@ from modules.daemons import SyncLedger
 class VaultManager:
     def __init__(self, filepath):
         self.filepath = filepath
-        self.ledgerpath = self.filepath + ".sync.enc"  
+        self.ledgerpath = os.path.splitext(self.filepath)[0] + ".enc"
         self.vaultio = VaultIO(self.filepath)
         #==================================
         self.io_lock = threading.RLock()
@@ -218,9 +218,12 @@ class VaultManager:
     def delete_file(self, uuid: bytes, v_ts: int, override_v_ts: int = None):
         with self.io_lock:
             delete_ts = override_v_ts if override_v_ts else int(time.time())
+
+            chunks = self.hashmap.get_meta(uuid, v_ts)
+            self.hashmap.add_file(uuid, delete_ts, chunks)
             
             self.vaultdb.delete_file(uuid, v_ts, delete_ts)
-            self.ledger.append_event(uuid, delete_ts, self.ledger.ACTION_DELETE)
+            self.ledger.append_event(uuid, delete_ts, self.ledger.ACTION_DELETE)   
             self.sync_map_to_disc()
             
     def rename_file(self, uuid: bytes, v_ts: int, new_virtual_path: str, override_v_ts: int = None):
@@ -245,7 +248,7 @@ class VaultManager:
             chunks = self.hashmap.get_meta(uuid, v_ts)
             self.hashmap.add_file(uuid, new_v_ts, chunks)
             
-            self.ledger.append_event(uuid, new_v_ts, self.ledger.ACTION_RENAME)
+            self.ledger.append_event(uuid, new_v_ts, self.ledger.ACTION_RENAME)              
             self.sync_map_to_disc()
 
     def ingest_network_payload(self, tmp_filepath: str, virtual_filepath: str, uuid: bytes, remote_v_ts: int, local_v_ts: int,  incoming_hashmap: list, created_at: int = None, is_conflict: bool = False):
@@ -292,7 +295,7 @@ class VaultManager:
                 }
                 
                 self.vaultdb.inmo_file(uuid, remote_v_ts, virtual_filepath, meta_dict)
-                self.ledger.append_event(uuid, remote_v_ts, action)
+                self.ledger.append_event(uuid, remote_v_ts, action)              
                 self.sync_map_to_disc()
 
         finally:
@@ -379,7 +382,7 @@ class VaultManager:
                 pt[:] = b'\x00' * len(pt)
             
             self.hashmap.add_file(uuid, new_v_ts, new_chunks)
-            self.ledger.append_event(uuid, new_v_ts, self.ledger.ACTION_EDIT)
+            self.ledger.append_event(uuid, new_v_ts, self.ledger.ACTION_EDIT)         
         
             self.sync_map_to_disc()
             
