@@ -8,6 +8,23 @@ class VaultIO:
     @staticmethod
     def conditional_format(input_str, format_char):
         return [int(part) for part in input_str.split(format_char)]
+
+    @staticmethod
+    def write_cargo(filepath: str, chunk_generator):
+        """Pure I/O tool: Writes a stream of data directly to a file."""
+        with open(filepath, 'wb') as f:
+            for chunk in chunk_generator:
+                f.write(chunk)
+
+    @staticmethod
+    def yield_cargo(filepath: str, chunk_size=2*1024*1024):
+            """Pure I/O tool : Streams the entire file sequentially in chunks (Default 2MB)."""
+            with open(filepath, 'rb') as rfile:
+                while True:
+                    chunk = rfile.read(chunk_size)
+                    if not chunk:
+                        break
+                    yield chunk
     
     #ZONE 0 : HEADER (Bytes 0 - 23)
     
@@ -131,6 +148,8 @@ class VaultIO:
             rfile.seek(start_byte)
             stream = rfile.read(byte_len)
         return stream
+
+    
     
     def read_map(self, pointer_offset, pointer_length):
         with open(self.filepath, 'rb') as rfile:
@@ -177,7 +196,7 @@ class VaultIO:
                 os.remove(backup_path)
             except OSError:
                 pass
-    
+
     def rescue_vault(self):
         ams_path = self.filepath + ".ams"
         als_path = self.filepath + ".als"

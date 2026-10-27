@@ -15,6 +15,11 @@ class Opcodes:
     
     DSA_PUB   = b"I2000"  # "Here is my full ML-DSA Public Key."
     PUB_ERR   = b"I2001"  # "Your public key failed mathematical validation."
+
+    KEM_PUB   = b"I2100"  # "Here is my full ML-KEM Public Key"
+    KEM_ERR   = b"I2101"  # "There is an error with your public key"
+    KEM_CIPH  = b"I2200"  # "Here is encapsulated shared secret ciphertext"
+    CIPH_ERR  = b"I2201"  # "There is an error with your shared ciphertext"
     
     DEVC_ID   = b"I3000"  # "Here is my Device Name and OS Type (JSON)."
     ID_ERR    = b"I3001"  # "I could not parse your Device ID JSON."
@@ -56,12 +61,13 @@ class Opcodes:
     SYNCO     = b"S1000"  # Initialization request for entering sync queue
     SYNC_LDG  = b"S2000"  # MessagePack Sync Ledger transmission
     SYNC_DLT  = b"S2001"  # Delta Ledger transmission for mid-session UUIDs
+    FORCE_FULL= b"S2100"  # Sends the full file due to request or issue
 
     
     # =========================================================================
     # NUCLEAR OPERATIONS (N) - Highly destructive/sensitive commands
     # =========================================================================
-    NUKE_REPL = b"N1000"  # "Force-delete your vault and replace it with mine."
+    NUKE_WIPE = b"N1000"  # "Force-delete your vault and replace it with mine."
     NUKE_ERR  = b"N1001"  # "Nuclear replace denied (e.g., human refused password prompt)."
     
     DEK_CHNG  = b"N2000"  # "We are rotating the master Data Encryption Key."
@@ -88,7 +94,9 @@ class LocalOpcodes:
     LOCAL_DELETE = b"Q1001"  
     LOCAL_RENAME = b"Q1002"  
     LOCAL_MARK_SYNC = b"Q1003" #Safely mark a ledger record as synced
-    LOCAL_EDIT = b"Q1004" 
+    LOCAL_EDIT = b"Q1004"
+    LOCAL_FORK = b"Q1005" # Duplicate local file to (Conflicted Copy)
+    LOCAL_RESTORE = b"Q1006" # Restore an archived/deleted file version
     
     # --- NETWORK QUEUEING (Q2) ---
     NET_DATA     = b"Q2000"  #Incoming File Data (Ingest/Edit). Maps to [V4000]

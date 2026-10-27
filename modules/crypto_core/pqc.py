@@ -62,7 +62,7 @@ class MLKEM:
         else:
             self.keyencapsulation = KeyEncapsulation(self.algorithm)
         
-    def generate_key(self, type : str):
+    def generate_key(self, type : str = None):
         """
         MANDATORY FIRST STEP:
         Populates self.pvt_key and self.pub_key whether starting fresh or from an existing key.
@@ -80,7 +80,7 @@ class MLKEM:
         elif type == "pvt":
             return self.pvt_key
         else:
-            raise ValueError("Did not receive valid type")
+            return
 
     def encapsulate(self, peer_public_key: bytes):
         try:

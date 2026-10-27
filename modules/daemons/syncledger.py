@@ -75,9 +75,9 @@ class SyncLedger:
             raise ValueError(f"Unknown SyncLedger action: {action}")
         self._flush()
     
-    def mark_synced(self, uuid: bytes, highest_v_ts: int):
-        #legacy function for compatibility
-        pass
+    def mark_synced(self, uuid: bytes, data_ts: int, meta_ts: int, is_del: bool = False):
+        self.ledger[uuid] = [data_ts, meta_ts, is_del]
+        self._flush()
 
     def mark_all_synced(self, ml_dsa_hash : bytes):
         #legacy function for compatibility

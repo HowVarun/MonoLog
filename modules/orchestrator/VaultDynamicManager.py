@@ -4,6 +4,7 @@ import concurrent.futures
 import portalocker
 import shutil
 import tempfile
+import random
 
 from modules.system import VaultIO
 from modules.vaultmap import VaultMap
@@ -63,10 +64,16 @@ class VaultDynamicManager:
         local_dek = self.orchestrator.dek
         if not local_dek:
             raise ValueError("Vault is locked")
+        
         transit_aesgcm = AesGcm(shared_secret)
         dek_iv, dek_encrypted = transit_aesgcm.encrypt_cipherstream(local_dek)
+
         transit_path = os.path.join(tempfile.gettempdir(), f"{self.filepath}.tmp")
-        shutil.copy2(self.filepath, transit_path)
+
+        with self.orchestrator.io_lock():
+            self.orchestrator.sync_map_to_disc()
+            shutil.copy2(self.filepath, transit_path)
+
         with open(transit_path, 'r+b') as tfile:
             tfile.seek(0)
             magic_num = struct.pack('>4s', b"TRAN")
@@ -74,6 +81,7 @@ class VaultDynamicManager:
             tfile.seek(23)
             tfile.write(dek_iv + dek_encrypted)
             os.fsync(tfile.fileno())
+
         return transit_path
     
     def process_received_vault(self, received_tmp_path: str, final_dest_path: str, shared_secret: bytes, new_mp: str, new_wp: str):
@@ -82,6 +90,7 @@ class VaultDynamicManager:
             magic_num = tfile.read(4)
             if magic_num != b"TRAN":
                 raise ValueError("Invalid File State! Expected 'TRAN' magic number")
+            
             tfile.seek(23)
             lockbox = tfile.read(60)
             dek_iv = lockbox[:12]
@@ -96,6 +105,9 @@ class VaultDynamicManager:
 
             local_aesgcm = AesGcm(kek)
             ndek_iv, ndek_cipher = local_aesgcm.encrypt_cipherstream(dek)
+
+            tfile.seek(7)
+            tfile.write(salt)
 
             tfile.seek(23)
             tfile.write(ndek_iv + ndek_cipher)
@@ -248,3 +260,38 @@ class VaultDynamicManager:
             #==================================
             self.orchestrator.lock_vault()
             #==================================
+    
+    def stream_transit_vault(self, transit_path: str, chunk_size: int = 2*1024*1024):
+        """Uses VaultIO to yield the transit file in memory-safe chunks."""
+        for chunk in VaultIO.yield_cargo(transit_path, chunk_size):
+            yield chunk
+
+    def receive_transit_vault(self, transit_path: str, chunk_generator):
+        """Receives a full vault stream from the network and writes it via VaultIO."""
+        VaultIO.write_cargo(transit_path, chunk_generator)
+
+    
+    def execute_self_destruct(self):
+        try:
+            with self.orchestrator.io_lock:
+                #wipe the salt, lockbox and some data
+                with open(self.filepath, 'r+b') as f:
+                    f.seek(0)
+                    f.write(b'\x00' * 127)
+                    filesize = os.path.getsize(self.filepath)
+                    for _ in range(100):
+                        start_pos = random.randint(127, max(127, filesize - 1))
+                        # Determine a safe wipe length that doesn't artificially extend the file size
+                        wipe_len = random.randint(250, 500)
+                        safe_wipe_len = min(wipe_len, filesize - start_pos)
+                        f.seek(start_pos)
+                        f.write(b'\x00' * safe_wipe_len)
+                os.remove(self.filepath)
+                if self.orchestrator.ledger and os.path.exists(self.orchestrator.ledger.ledger_path):
+                    os.remove(self.orchestrator.ledger.ledger_path)
+                    
+            print("[*] Vault destroyed. Goodbye.")
+        except Exception:
+            pass
+        finally:
+            os._exit(1) #forcekill python instantly

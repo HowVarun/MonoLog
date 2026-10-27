@@ -72,6 +72,15 @@ class TaSkewer:
                 existing_v_ts=args.get("existing_v_ts")
             )
 
+        elif opcode == LocalOpcodes.LOCAL_EDIT:
+            self.orchestrator.reingest_edit(
+                ghost_filepath=args["ghost_filepath"],
+                original_hash=args["original_hash"],
+                uuid=args["uuid"],
+                active_v_ts=args["active_v_ts"],
+                ghost_io=args["ghost_io"]
+            )
+
         elif opcode == LocalOpcodes.LOCAL_DELETE:
             self.orchestrator.delete_file(
                 uuid=args["uuid"],
@@ -83,6 +92,28 @@ class TaSkewer:
                 uuid=args["uuid"],
                 v_ts=args["v_ts"],
                 new_virtual_path=args["new_virtual_path"]
+            )
+
+        elif opcode == LocalOpcodes.LOCAL_FORK:
+            
+            self.orchestrator.fork_conflicted_copy(
+                uuid=args["uuid"],
+                active_v_ts=args["active_v_ts"]
+            )
+
+        elif opcode == LocalOpcodes.LOCAL_RESTORE:
+            self.orchestrator.reingest_edit(
+                uuid=args["uuid"],
+                active_v_ts=args.get("active_v_ts", 0),
+                archived_v_ts=args["archived_v_ts"]
+            )
+
+        elif opcode == LocalOpcodes.LOCAL_MARK_SYNC:
+            self.orchestrator.ledger.mark_synced(
+                uuid=args["uuid"],
+                data_ts=args["data_ts"],
+                meta_ts=args["meta_ts"],
+                is_del=args.get("is_del", False)
             )
 
         # =====================================================================
@@ -111,8 +142,7 @@ class TaSkewer:
                 remote_v_ts=args["remote_v_ts"],
                 local_v_ts=args.get("local_v_ts", 0),
                 incoming_hashmap=args["hashmap"],
-                created_at=args.get("created_at"),
-                is_conflict=args.get("is_conflict", False)
+                created_at=args.get("created_at")
             )
             
         elif opcode == LocalOpcodes.LOCAL_MARK_SYNC:

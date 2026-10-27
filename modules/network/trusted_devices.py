@@ -24,6 +24,7 @@ class TrustedDevicesDatabase:
             added_timestamp REAL NOT NULL,
             last_seen REAL NOT NULL,
             is_paused INT,
+            is_compromised INT DEFAULT 0,
             PRIMARY KEY (ml_dsa_hash, vault_id)
             )'''
             #device name = John Doe's Computer, Device_type = Windws/MacOS/ Linux Laptop, Desktop, PC, Iphone, Android
@@ -43,8 +44,8 @@ class TrustedDevicesDatabase:
                 row = cursor.fetchone()
                 preserved_last_seen = row[0] if row else 0
                 QUERY2 = '''INSERT OR REPLACE INTO trusted_devices
-                (ml_dsa_hash, vault_id, device_name, device_type, nickname, ml_dsa_pub_key, added_timestamp, last_seen, is_paused)
-                VALUES (?,?,?,?,?,?,?,?,0)'''
+                (ml_dsa_hash, vault_id, device_name, device_type, nickname, ml_dsa_pub_key, added_timestamp, last_seen, is_paused, is_compromised)
+                VALUES (?,?,?,?,?,?,?,?,0,0)'''
                 cursor.execute(QUERY2, (ml_dsa_hash, vault_id, device_name, device_type, nick, ml_dsa_pub_key, curr_time, preserved_last_seen))
                 conn.commit()
                 return True
@@ -58,7 +59,7 @@ class TrustedDevicesDatabase:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 QUERY = '''SELECT * FROM trusted_devices
-                WHERE ml_dsa_hash = ? AND vault_id = ? and ml_dsa_pub_key IS NOT NULL'''
+                WHERE ml_dsa_hash = ? AND vault_id = ? AND ml_dsa_pub_key IS NOT NULL AND is_compromised = 0'''
                 cursor.execute(QUERY, (ml_dsa_hash, vault_id))
                 row = cursor.fetchone()
                 
@@ -95,7 +96,7 @@ class TrustedDevicesDatabase:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 QUERY = '''UPDATE trusted_devices SET nickname = ?
-                WHERE ml_dsa_hash = ? AND vault_id = ?'''
+                WHERE ml_dsa_hash = ? AND vault_id = ? AND ml_dsa_pub_key IS NOT NULL AND is_compromised = 0'''
                 cursor.execute(QUERY, (nickname, ml_dsa_hash, vault_id))
                 conn.commit()
         except sqlite3.Error as e:
@@ -107,7 +108,7 @@ class TrustedDevicesDatabase:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 QUERY = '''UPDATE trusted_devices SET is_paused = ?
-                WHERE ml_dsa_hash = ? AND vault_id = ?'''
+                WHERE ml_dsa_hash = ? AND vault_id = ? AND ml_dsa_pub_key IS NOT NULL AND is_compromised = 0'''
                 bool_val = 0
                 if is_paused:
                     bool_val = 1
@@ -148,12 +149,45 @@ class TrustedDevicesDatabase:
                 cursor = conn.cursor()
                 QUERY = '''SELECT device_name, nickname, ml_dsa_hash, device_type, ml_dsa_pub_key, is_paused, added_timestamp, last_seen 
                            FROM trusted_devices
-                           WHERE vault_id = ? AND ml_dsa_pub_key IS NOT NULL'''
+                           WHERE vault_id = ? AND ml_dsa_pub_key IS NOT NULL AND is_compromised = 0'''
                 cursor.execute(QUERY, (vault_id,))
                 return [dict(row) for row in cursor.fetchall()]
         except sqlite3.Error as e:
             print(f"[-] Database Error (Get All): {e}")
             return []
 
-    
+    def mark_device_compromised(self, ml_dsa_hash: bytes) -> bool:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                QUERY = '''UPDATE trusted_devices SET is_compromised = 1 WHERE ml_dsa_hash = ?'''
+                cursor.execute(QUERY, (ml_dsa_hash,))
+                conn.commit()
+                return cursor.rowcount > 0
+        except sqlite3.Error:
+            return False
+
+    def check_if_compromised(self, ml_dsa_hash: bytes) -> bool:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                QUERY = '''SELECT is_compromised FROM trusted_devices WHERE ml_dsa_hash = ?'''
+                cursor.execute(QUERY, (ml_dsa_hash,))
+                rows = cursor.fetchall()
+                # If ANY record for this device is marked compromised, return True
+                return any(row[0] == 1 for row in rows)
+        except sqlite3.Error:
+            return False
+
+    def get_last_seen(self, ml_dsa_hash: bytes, vault_id : bytes):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                QUERY = '''SELECT last_seen FROM trusted_devices WHERE ml_dsa_hash = ? AND vault_id = ?'''
+                cursor.execute(QUERY, (ml_dsa_hash, vault_id))
+                last_seen = cursor.fetchone()
+
+                return last_seen
+        except sqlite3.Error:
+            return None
             
