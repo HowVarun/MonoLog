@@ -3,7 +3,7 @@ import threading
 import traceback
 
 from modules.system import LocalOpcodes
-from modules.orchestrator import VaultDynamicManager
+from modules.orchestrator.surgeon import VaultDynamicManager
 
 class TaSkewer:
     def __init__(self, orchestrator):
@@ -60,6 +60,13 @@ class TaSkewer:
 
     def _dispatch(self, opcode: bytes, args: dict):
         """Routes opcodes strictly to their target methods."""
+        print(
+                "[DEBUG] opcode =", opcode,
+                "| manager id =", id(self.orchestrator),
+                "| vaultdb exists =", hasattr(self.orchestrator, "vaultdb"),
+                "| hashmap exists =", hasattr(self.orchestrator, "hashmap"),
+                "| dek exists =", hasattr(self.orchestrator, "dek"),
+            ) #DEBUGG
         
         # =====================================================================
         # CATEGORY Q1: EVERYDAY LOCAL I/O
@@ -76,6 +83,8 @@ class TaSkewer:
             self.orchestrator.reingest_edit(
                 ghost_filepath=args["ghost_filepath"],
                 original_hash=args["original_hash"],
+                original_mtime=args.get("original_mtime", 0.0),
+                original_size=args.get("original_size", 0),
                 uuid=args["uuid"],
                 active_v_ts=args["active_v_ts"],
                 ghost_io=args["ghost_io"]
@@ -102,7 +111,7 @@ class TaSkewer:
             )
 
         elif opcode == LocalOpcodes.LOCAL_RESTORE:
-            self.orchestrator.reingest_edit(
+            self.orchestrator.restore_version(
                 uuid=args["uuid"],
                 active_v_ts=args.get("active_v_ts", 0),
                 archived_v_ts=args["archived_v_ts"]

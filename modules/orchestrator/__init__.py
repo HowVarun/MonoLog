@@ -1,2 +1,2 @@
-from .orchestrator import VaultManager
-from .VaultDynamicManager import VaultDynamicManager
+from .manager import VaultManager
+from .surgeon import VaultDynamicManager

@@ -62,6 +62,7 @@ class Opcodes:
     SYNC_LDG  = b"S2000"  # MessagePack Sync Ledger transmission
     SYNC_DLT  = b"S2001"  # Delta Ledger transmission for mid-session UUIDs
     FORCE_FULL= b"S2100"  # Sends the full file due to request or issue
+    REQ_META =  b"S2200"  # Sends only the meta data of the file like its name
 
     
     # =========================================================================

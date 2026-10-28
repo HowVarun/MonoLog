@@ -14,8 +14,6 @@ from modules.daemons import Defragmentation
 class VaultDynamicManager:
     def __init__(self, orchestrator):
         self.orchestrator = orchestrator
-        self.vaultdb = orchestrator.vaultdb
-        self.hashmap = orchestrator.hashmap
         self.vaultio = orchestrator.vaultio
         self.filepath = orchestrator.filepath
 
@@ -68,10 +66,11 @@ class VaultDynamicManager:
         transit_aesgcm = AesGcm(shared_secret)
         dek_iv, dek_encrypted = transit_aesgcm.encrypt_cipherstream(local_dek)
 
-        transit_path = os.path.join(tempfile.gettempdir(), f"{self.filepath}.tmp")
 
-        with self.orchestrator.io_lock():
+        with self.orchestrator.io_lock:
             self.orchestrator.sync_map_to_disc()
+            base_filename = os.path.splitext(os.path.basename(self.orchestrator.filepath))[0]
+            transit_path = os.path.join(tempfile.gettempdir(), f"{base_filename}.tmp")
             shutil.copy2(self.filepath, transit_path)
 
         with open(transit_path, 'r+b') as tfile:
@@ -124,7 +123,7 @@ class VaultDynamicManager:
     def _generate_file_list(self, active_file_ids: list):
         for file_id in active_file_ids:
             uuid, v_ts = VaultMap.uuid_time(file_id) 
-            chunks = self.hashmap.get_meta(uuid, v_ts) 
+            chunks = self.orchestrator.hashmap.get_meta(uuid, v_ts) 
             for chunk in chunks:
                 yield (file_id, chunk['iv'], chunk['start'], chunk['end'])
     
@@ -189,8 +188,8 @@ class VaultDynamicManager:
             new_kek_aes = AesGcm(new_kek)
             n_dek_iv, n_dek_cipher = new_kek_aes.encrypt_cipherstream(new_dek)
             #==================================
-            full_db_metadata = self.vaultdb.get_complete_meta()
-            file_id_list = self.hashmap.get_all_file_ids()
+            full_db_metadata = self.orchestrator.vaultdb.get_complete_meta()
+            file_id_list = self.orchestrator.hashmap.get_all_file_ids()
             new_map_dict = {file_id: [] for file_id in file_id_list}
             #==================================
             with self.orchestrator.io_lock:

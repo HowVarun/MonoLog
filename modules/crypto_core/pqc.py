@@ -1,9 +1,10 @@
 from oqs.oqs import Signature, KeyEncapsulation
 
 class MLDSA:
-    def __init__(self, secret_key: bytes = None):
+    def __init__(self, secret_key: bytes = None, public_key: bytes = None):
         self.algorithm = 'ML-DSA-87'
         self.has_key = False
+        self._cached_pub = public_key
         
         if not secret_key:
             self.signature = Signature(self.algorithm)
@@ -13,31 +14,31 @@ class MLDSA:
     
     def generate_key(self, key_type : str):
         if not self.has_key:
-            pub_key = bytearray(self.signature.generate_keypair())
-            _pvt_key = bytearray(self.signature.export_secret_key())
+            self._cached_pub = bytes(self.signature.generate_keypair())
             self.has_key = True
-        else:
-            _pvt_key = bytearray(self.signature.export_secret_key())
-            pub_key = bytearray(_pvt_key[-2592:])
 
         if key_type == "pub":
-            _pvt_key[:] = b'\x00' * len(_pvt_key)
-            return bytes(pub_key)
+            if not self._cached_pub:
+                raise ValueError("Public key was not loaded")
+            return self._cached_pub
+
         elif key_type == "pvt":
-            pub_key[:] = b'\x00' * len(pub_key)
-            return bytes(_pvt_key)
-        else:
-            raise ValueError("Did not receive valid type")
+            return bytes(self.signature.export_secret_key())
     
     def sign(self, message: bytes):
         if not self.has_key:
             raise ValueError("No secret key loaded. Generate or pass a key first.")
-        return self.signature.sign(message)
+
+        m_message = bytes(message)
+        return self.signature.sign(m_message)
     
     def verify(self, message: bytes, signature: bytes, public_key: bytes):
         with Signature('ML-DSA-87') as local_sign:
+            m_message = bytes(message)
+            m_signature = bytes(signature)
+            m_public_key = bytes(public_key)
             try:
-                return(local_sign.verify(message, signature, public_key))
+                return(local_sign.verify(m_message, m_signature, m_public_key))
             except Exception:
                 return False
                 
@@ -85,18 +86,19 @@ class MLKEM:
     def encapsulate(self, peer_public_key: bytes):
         try:
             kem_cipher, shared_secret = self.keyencapsulation.encap_secret(peer_public_key)
-            return kem_cipher, shared_secret
+            return kem_cipher, bytearray(shared_secret)
         except Exception:
             return False
     
     def decapsulate(self, kem_cipher: bytes):
+        m_kem_cipher = bytes(kem_cipher)
         if not self.pvt_key:
             raise ValueError("State uninitialized. You must call generate_key() before decapsulating.")
             
         try:
             with KeyEncapsulation(self.algorithm, self.pvt_key) as decap:
-                shared_secret = decap.decap_secret(kem_cipher)
-                return shared_secret
+                shared_secret = decap.decap_secret(m_kem_cipher)
+                return bytearray(shared_secret)
         except Exception:
             return False
 

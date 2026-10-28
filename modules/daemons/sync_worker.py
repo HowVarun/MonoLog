@@ -14,7 +14,7 @@ from modules.system import Opcodes, LocalOpcodes
 from modules.network import DesktopDiscover, SecureNetworkTransport, TrustedDevicesDatabase
 from modules.system import PrivateKeyManager
 from modules.crypto_core import hashing, SasPass, AesGcm, MLKEM
-from modules.orchestrator import VaultDynamicManager
+
 
 class SecurityError(Exception):
     pass
@@ -208,17 +208,22 @@ class SyncWorker:
         
 
     def _resolve_name_collision(self, base_name: str) -> str:
-        # Get all existing nicknames + our own local name
-        existing_names = [p.get('nickname', '').lower() for p in self.peers.get_all_peers()]
-        existing_names.append(self.local_name.lower())
         
-        if base_name.lower() not in existing_names:
-            return base_name
+        existing_names = []
+        for p in self.peers.get_all_peers():
+            name = p.get('nickname') or p.get('device_name') or ""
+            existing_names.append(name.lower())
+            
+        existing_names.append((self.local_name or "").lower())
+        
+        safe_base = (base_name or "Unknown Device")
+        if safe_base.lower() not in existing_names:
+            return safe_base
             
         counter = 1
-        while f"{base_name} ({counter})".lower() in existing_names:
+        while f"{safe_base} ({counter})".lower() in existing_names:
             counter += 1
-        return f"{base_name} ({counter})"
+        return f"{safe_base} ({counter})"
 
     def _sync_file_stream(self, transport: SecureNetworkTransport, total_chunks: int):
         #generator yields incoming file chunks from the network
@@ -279,14 +284,16 @@ class SyncWorker:
     def _inbound_router(self, transport : SecureNetworkTransport):
 
         opcode_received, peer_hash = transport.receive_message()
-        if opcode_received == Opcodes.NUCLEAR_WIPE:
+        if opcode_received == Opcodes.NUKE_WIPE:
             self._handle_nuclear_wipe(peer_hash)
+            import traceback
+            traceback.print_exc() #DEBUGG 
             return
         
         if self.peers.check_if_compromised(peer_hash):
             wipe_payload = b"WIPE:" + peer_hash
             sig = self.my_identity.sign(wipe_payload)
-            transport.send_message(Opcodes.NUCLEAR_WIPE, msgpack.packb([self.my_pub_key, sig], use_bin_type=True))
+            transport.send_message(Opcodes.NUKE_WIPE, msgpack.packb([self.my_pub_key, sig], use_bin_type=True))
             return
 
         #==============PROTOCOL ROUTING===============
@@ -343,69 +350,71 @@ class SyncWorker:
             transport.close_connection()
             
     #===========================================================================================================================
-    def _outbound_router(self, transport : SecureNetworkTransport, expected_mdns_hash : bytes):
+    def _outbound_router(self, transport: SecureNetworkTransport, expected_mdns_hash: bytes):
         pub_hash = hashing.hash_key(self.my_pub_key)
 
         if self.peers.check_if_compromised(expected_mdns_hash):
             wipe_payload = b"WIPE:" + expected_mdns_hash
             sig = self.my_identity.sign(wipe_payload)
-            transport.send_message(Opcodes.NUCLEAR_WIPE, msgpack.packb([self.my_pub_key, sig], use_bin_type=True))
-            return
+
+            transport.send_message(Opcodes.NUKE_WIPE, msgpack.packb([self.my_pub_key, sig], use_bin_type=True))
+            return "WIPED_PEER"
         
         is_known = self.peers.is_device_trusted(expected_mdns_hash, self.vault_id)
 
         #==========Routing Protocol=======================
         if is_known:
             if is_known.get('is_paused') == 1:
-                return
+                print("[*] Sync is paused for this device.")
+                return "PAUSED"
             transport.send_message(Opcodes.TRUST_QRY, pub_hash)
             opcode, payload = transport.receive_message()
-            if opcode == Opcodes.NUCLEAR_WIPE:
+            if opcode == Opcodes.NUKE_WIPE:
+                import traceback
+                traceback.print_exc()  #DEBUGG
                 self._handle_nuclear_wipe(payload, expected_mdns_hash)
-                return
+                return "SELF_WIPED"
 
-            
             if opcode == Opcodes.TRUST_YES:
                 self._execute_sync_session(transport, expected_mdns_hash, is_client=True)
+                return "SYNC_OK"
             elif opcode == Opcodes.DEVC_RM:
                 self.peers.remove_peer(expected_mdns_hash, self.vault_id)
                 transport.send_message(Opcodes.TRUST_RM)
-                raise SecurityError("Device requested syncing but device not trusted")
-            elif opcode == Opcodes.SYNC_ERR:
-                raise Exception("Peer raised Sync Error")
+                return "UNPAIRED_BY_PEER"
             else:
-                raise SecurityError("Invalid opcode at current stage")
+                raise SecurityError(f"Invalid opcode at current stage: {opcode}")
         else:
             self._check_partner_slot(expected_mdns_hash)
             transport.send_message(Opcodes.DSA_HASH, pub_hash)
-            opcode, _ = transport.receive_message()
+            opcode, payload = transport.receive_message()
 
-            if opcode == Opcodes.NUCLEAR_WIPE:
-                self._handle_nuclear_wipe(expected_mdns_hash)
-                return
+            if opcode == Opcodes.NUKE_WIPE:
+                self._handle_nuclear_wipe(payload, expected_mdns_hash)
+                return "SELF_WIPED"
 
-            
             if opcode == Opcodes.TRUST_NO:
                 self._execute_pairing_client(transport, expected_mdns_hash)
+                return "PAIRED_OK"
             elif opcode == Opcodes.TRUST_YES:
                 transport.send_message(Opcodes.DEVC_RM)
                 opcode, _ = transport.receive_message()
                 if opcode == Opcodes.TRUST_RM:
-                    print("Peer marked device untrusted")
+                    return "UNPAIRED_BY_PEER"
                 else:
                     raise SecurityError("Secondary device not unpaired successfully!")
             elif opcode == Opcodes.PAIR_FULL:
-                raise SecurityError("Server vault is already paired with another device!")
+                raise SecurityError("Server vault is already paired with maximum devices!")
             else:
-                raise SecurityError("Invalid opcode at current stage")
-        
+                raise SecurityError(f"Invalid opcode at current stage: {opcode}")   
     
-    def _route_outbound_connection(self, target_ip: str, target_port : int, expected_mdns_hash : bytes):
+    def _route_outbound_connection(self, target_ip: str, target_port: int, expected_mdns_hash: bytes):
         client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        transport = None
 
         try:
             client_sock.connect((target_ip, target_port))
-            transport = SecureNetworkTransport(sock = client_sock)
+            transport = SecureNetworkTransport(sock=client_sock)
 
             rand_byte = os.urandom(8)
             transport.send_message(Opcodes.PING, rand_byte)
@@ -413,11 +422,13 @@ class SyncWorker:
             if rcvd_byte != rand_byte:
                 raise SecurityError("Device transport functionality compromised")
             
-            self._outbound_router(transport, expected_mdns_hash)
+            return self._outbound_router(transport, expected_mdns_hash)
         except Exception as e:
             print(f"[{Opcodes.ERR_FATAL.decode('utf-8')}] Routing failure: {e}")
+            return None
         finally:
-            transport.close_connection()
+            if transport:
+                transport.close_connection()
 
     #===========================================================================================================================
     def _execute_pairing_server(self, transport : SecureNetworkTransport, peer_hash):
@@ -477,7 +488,7 @@ class SyncWorker:
                         kem = MLKEM()
                         kem_ciph, shared_secret = kem.encapsulate(peer_kem_pub)
                         transport.send_message(Opcodes.KEM_CIPH, kem_ciph)
-                        
+                        from modules.orchestrator import VaultDynamicManager
                         surgeon = VaultDynamicManager(self.vault_manager)
                         transit_path = surgeon.prepare_vault_transfer(shared_secret)
                         
@@ -511,13 +522,14 @@ class SyncWorker:
                         device_type=peer_type,
                         ml_dsa_pub_key=peer_key
                     )
-                    self.peers.update_last_seen(peer_hash, self.vault_id)
+                    
                     print(f"\n[+] Vault successfully paired with [{peer_name}]!")
                     
                     if not peer_clone:
                         print("[*] Transitioning to Sync Session...")
                         self._execute_sync_session(transport, peer_hash, is_client=False)
                     else:
+                        self.peers.update_last_seen(peer_hash, self.vault_id)
                         transport.send_message(Opcodes.BYE_GRACE)
                 else:
                     raise SecurityError("Authentication handshake failed during commitment exchange")
@@ -527,6 +539,7 @@ class SyncWorker:
                        
         except Exception as e:
             print(f"[{Opcodes.ERR_FATAL.decode('utf-8')}] Pairing failure: {e}")
+            
 
     #===========================================================================================================================
     def _execute_pairing_client(self, transport : SecureNetworkTransport, peer_hash):
@@ -542,7 +555,7 @@ class SyncWorker:
                 raise SecurityError("Hash does not match key!")
 
             active_files = self.vault_manager.vaultdb.get_active_files() if getattr(self.vault_manager, 'vaultdb', None) else []
-            wants_clone = (len(active_files) == 0)
+            wants_clone = self.vault_id.startswith(b"PRE_VAULT")
 
             self_devc_meta = {
                 "device_name": self.local_name,
@@ -609,6 +622,7 @@ class SyncWorker:
                     print(f"[*] Downloading {file_size / (1024*1024):.1f} MB Vault from {peer_name}...")
                     
                     # 3. Delegate the raw disk write to the Surgeon using our generator!
+                    from modules.orchestrator import VaultDynamicManager
                     surgeon = VaultDynamicManager(self.vault_manager)
                     surgeon.receive_transit_vault(
                         received_tmp_path, 
@@ -634,8 +648,8 @@ class SyncWorker:
                     shared_secret[:] = b'\x00' * 32
 
                     
-                    
-                    self.vault_manager.boot_vault(new_mp, new_wp)
+                    self.vault_manager.unlock_hash(new_mp, new_wp)
+                    self.vault_manager.boot_vault()
                     self.ledger = self.vault_manager.ledger
                     self.skewer = getattr(self.vault_manager, 'skewer', None)
                     current_vault_id = self.vault_id
@@ -643,6 +657,15 @@ class SyncWorker:
                     if self.vault_manager.ledger:
                         self.vault_manager.ledger.ledger = peer_unsynced_data
                         self.vault_manager.ledger._flush()
+
+                    self.peers.add_trusted_device(
+                      ml_dsa_hash=peer_hash,
+                      vault_id=current_vault_id,
+                      device_name=peer_name,
+                      device_type=peer_type,
+                      ml_dsa_pub_key=peer_key
+                    )
+                    self.peers.update_last_seen(peer_hash, current_vault_id)
                     
                     print("[+] Vault decrypted and ready for UI Boot!")
 
@@ -650,9 +673,16 @@ class SyncWorker:
                 else:
                     # NOT CLONING: Re-Pairing an existing vault. 
                     # Transition seamlessly into syncing to fix each other's vaults!
+                    self.peers.add_trusted_device(
+                      ml_dsa_hash=peer_hash,
+                      vault_id=current_vault_id,
+                      device_name=peer_name,
+                      device_type=peer_type,
+                      ml_dsa_pub_key=peer_key
+                    )
                     print("[*] Re-pairing successful. Transitioning directly to Sync Session...")
                     self._execute_sync_session(transport, peer_hash, is_client=True)
-                    return # execute_sync_session handles BYE_GRACE
+                     # execute_sync_session handles BYE_GRACE
 
                 self.peers.add_trusted_device(
                     ml_dsa_hash=peer_hash,
@@ -739,7 +769,7 @@ class SyncWorker:
 
     def _auditor(self, peer_unsynced_data: dict, last_seen: float, is_client: bool) -> dict:
         local_ledger = self.ledger.get_unsynced_payload() # dict: {uuid: [data_ts, meta_ts, is_del]}
-        active_local_files = self.vault_manager.vaultdb.get_active_files() if hasattr(self.vault_manager, 'vaultdb') else {}
+        active_local_files = dict(self.vault_manager.vaultdb.get_active_files()) if hasattr(self.vault_manager, 'vaultdb') else {}
         pull_list = {}
         
         for p_uuid, p_state in peer_unsynced_data.items():
@@ -1045,8 +1075,12 @@ class SyncWorker:
 
     def _handle_nuclear_wipe(self, payload: bytes, peer_hash: bytes = None):
         try:
-            unpacked = msgpack.unpackb(payload, raw=False)
-            server_pub_key, signature = unpacked[0], unpacked[1]
+            unpacker = msgpack.Unpacker(raw=True, strict_map_key=False)
+            unpacker.feed(payload)
+            unpacked = next(unpacker)
+            server_pub_key = bytes(unpacked[0])
+            signature = bytes(unpacked[1])
+
             actual_hash = hashing.hash_key(server_pub_key)
 
             if peer_hash and actual_hash != peer_hash:
@@ -1057,7 +1091,8 @@ class SyncWorker:
                 raise SecurityError("Nuclear Wipe rejected: unknown device!")
 
             expected_msg = b"WIPE:" + hashing.hash_key(self.my_pub_key)
-            if self.my_identity.verify_signature(signature, expected_msg, server_pub_key):
+            if self.my_identity.verify(expected_msg, signature, server_pub_key):
+                from modules.orchestrator import VaultDynamicManager
                 surgeon = VaultDynamicManager(self.vault_manager)
                 surgeon.execute_self_destruct()
             else:

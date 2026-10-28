@@ -167,6 +167,19 @@ class TrustedDevicesDatabase:
         except sqlite3.Error:
             return False
 
+    def remove_compromise_flag(self, ml_dsa_hash: bytes):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE trusted_devices 
+                    SET is_compromised = 0 
+                    WHERE ml_dsa_hash = ?
+                ''', (ml_dsa_hash,))
+                conn.commit()
+        except sqlite3.Error as e:
+            print(f"[-] Database Error (Remove Compromise Flag): {e}")
+
     def check_if_compromised(self, ml_dsa_hash: bytes) -> bool:
         try:
             with sqlite3.connect(self.db_path) as conn:
@@ -187,7 +200,7 @@ class TrustedDevicesDatabase:
                 cursor.execute(QUERY, (ml_dsa_hash, vault_id))
                 last_seen = cursor.fetchone()
 
-                return last_seen
+                return last_seen[0]
         except sqlite3.Error:
             return None
             

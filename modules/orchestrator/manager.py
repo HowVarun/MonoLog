@@ -108,6 +108,10 @@ class VaultManager:
             
             if hasattr(self, 'vaultdb') and self.vaultdb is not None: 
                 self.vaultdb.close_connection()
+                print(
+                            "[DEBUG] lock_vault() is deleting vaultdb",
+                            "| manager id =", id(self),
+                    ) #DEBUGG
                 del self.vaultdb
         
             if hasattr(self, 'os_lock_handle'):  
@@ -344,71 +348,80 @@ class VaultManager:
 
     def restore_version(self, uuid: bytes, active_v_ts: int, archived_v_ts: int):
         with self.io_lock:
-            new_v_ts = int(time.time())
             archived_meta = self.vaultdb.get_meta(uuid, archived_v_ts)
-            if not archived_meta:
-                raise FileNotFoundError("Archived file UUID/timestamp does not exist")
-                
-            original_virtual_path = archived_meta['virtual_path'].split('.del_')[0]
-            safe_path = self.vaultdb.assign_name(original_virtual_path)
+            archived_chunks = self.hashmap.get_meta(uuid, archived_v_ts)
+            
+            if not archived_meta or not archived_chunks:
+                raise FileNotFoundError(f"Archived data missing for UUID {uuid.hex()[:8]}")
 
-            if active_v_ts:
-                self.vaultdb.delete_file(uuid, active_v_ts, new_v_ts)
+            
+            if active_v_ts > 0:
+                self.vaultdb.delete_file(uuid, active_v_ts, delete_ts=int(time.time()))
+
+            # 2. Duplicate chunks directly (No decryption needed, identical DEK!)
+            new_v_ts = int(time.time()) + 1 # +1 ensures strictly newer than delete_ts
+            new_chunks = []
+            
+            for chunk in archived_chunks:
+                raw_ct = self.vaultio.read_cargo(chunk['start'], chunk['end'])
+                start_byte = self.vaultio.get_eof()
+                end_byte = start_byte + len(raw_ct)
+                
+                self.vaultio.append_cargo(raw_ct)
+                new_chunks.append({
+                    "iv": chunk['iv'],
+                    "start": start_byte,
+                    "end": end_byte
+                })
+
+            # 3. Save to DB and Hashmap
+            self.hashmap.add_file(uuid, new_v_ts, new_chunks)
             
             meta_dict = {
                 "size_bytes": archived_meta['size_bytes'],
-                "created_at": archived_meta['created_at'], 
+                "created_at": archived_meta['created_at'],
                 "is_active": True
             }
+            
+            # Strip '.del_' suffix if present, and assign safe name to avoid overwrites
+            base_name = archived_meta['virtual_path'].split('.del_')[0]
+            safe_path = self.vaultdb.assign_name(base_name)
+            
             self.vaultdb.inmo_file(uuid, new_v_ts, safe_path, meta_dict)
-            
-            archived_chunks = self.hashmap.get_meta(uuid, archived_v_ts)
-            new_chunks = []
-            local_aesgcm = AesGcm(self.dek)
-            
-            for chunk in archived_chunks:
-                old_ct = self.vaultio.read_cargo(chunk['start'], chunk['end'])
-                
-                pt = bytearray(local_aesgcm.decrypt_cipherstream(chunk['iv'], old_ct))
-                
-                new_iv, new_ct = local_aesgcm.encrypt_cipherstream(pt)
-                
-                start_offset = self.vaultio.get_eof()
-                end_offset = start_offset + len(new_ct)
-                self.vaultio.append_cargo(new_ct)
-                
-                new_chunks.append({
-                    "iv": new_iv,
-                    "start": start_offset,
-                    "end": end_offset
-                })
-                
-                pt[:] = b'\x00' * len(pt)
-            
-            self.hashmap.add_file(uuid, new_v_ts, new_chunks)
-            self.ledger.append_event(uuid, new_v_ts, self.ledger.ACTION_EDIT)         
-        
+            self.ledger.append_event(uuid, new_v_ts, self.ledger.ACTION_EDIT)
             self.sync_map_to_disc()
-            
             return new_v_ts
 
-    def reingest_edit(self, ghost_filepath: str, original_hash: bytes, uuid: bytes, active_v_ts: int, ghost_io):
+    def reingest_edit(self, ghost_filepath: str, original_hash: bytes, original_mtime: float, original_size: int, uuid: bytes, active_v_ts: int, ghost_io):
         try:
             if not os.path.exists(ghost_filepath):
+                print(f"\n[-] Ghost Edit Failed: Temp file not found at {ghost_filepath}")
                 return False
 
+            current_size = os.path.getsize(ghost_filepath)
+            current_mtime = os.path.getmtime(ghost_filepath)
+            
             with open(ghost_filepath, 'rb') as f:
                 current_hash = hashing.hash_key(f.read())
 
-            if hashing.hash_verify(current_hash, original_hash):
+            is_changed = hashing.hash_verify(current_hash, original_hash) or (current_size != original_size) or (current_mtime > original_mtime)
+
+            if is_changed:
+                old_meta = self.vaultdb.get_meta(uuid, active_v_ts)
+                v_path = old_meta["virtual_path"] if old_meta else "/edited_file"
+                print(f"\n[*] Changes detected in [{v_path}]! (Hash/Size/Time modified)")
+                print("[*] Re-ingesting into Vault...")
                 self.ingest_file(
                     os_filepath=ghost_filepath,
-                    virtual_filepath=None,  # Automatically keeps existing virtual_path
+                    virtual_filepath=v_path,
                     existing_uuid=uuid,
                     existing_v_ts=active_v_ts
                 )
+                print("[+] File updated successfully!")
                 return True
-            return False
+            else:
+                print("\n[*] No changes detected in Ghost File (Hash, Size, and Time are identical).")
+                return False
         finally:
             ghost_io.secure_shred(ghost_filepath)
 

@@ -18,13 +18,19 @@ class VaultIO:
 
     @staticmethod
     def yield_cargo(filepath: str, chunk_size=2*1024*1024):
-            """Pure I/O tool : Streams the entire file sequentially in chunks (Default 2MB)."""
-            with open(filepath, 'rb') as rfile:
-                while True:
-                    chunk = rfile.read(chunk_size)
-                    if not chunk:
-                        break
-                    yield chunk
+        """Pure I/O tool : Streams the entire file sequentially in chunks (Default 2MB)."""
+        with open(filepath, 'rb') as rfile:
+            while True:
+                chunk = rfile.read(chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+
+    @staticmethod
+    def read_external_chunk(filepath, start_byte, end_byte):
+        with open(filepath, 'rb') as rfile:
+            data = rfile.read(end_byte - start_byte)
+            return data
     
     #ZONE 0 : HEADER (Bytes 0 - 23)
     
