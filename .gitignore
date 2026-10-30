@@ -22,3 +22,6 @@ dev/
 # Ignore Python Cache
 __pycache__/
 *.pyc
+
+# Ignore dist and build
+build/

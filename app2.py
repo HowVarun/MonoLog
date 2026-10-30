@@ -368,7 +368,7 @@ def main_menu():
     clear_screen()
     node_id = os.getenv("SV_NODE", "1")
     print("\n" + "="*45)
-    print(f" 🛡️  MONOLOG SECURE VAULT V2 (Node {node_id}) ")
+    print(f" 🛡️  MONOLOG VAULT (Node {node_id}) ")
     print("="*45)
     print("1. Create New Vault")
     print("2. Unlock Existing Vault")
