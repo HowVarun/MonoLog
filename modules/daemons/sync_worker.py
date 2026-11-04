@@ -228,11 +228,12 @@ class SyncWorker:
     def _sync_file_stream(self, transport: SecureNetworkTransport, total_chunks: int):
         #generator yields incoming file chunks from the network
         for _ in range(total_chunks): 
-            chunk_op, chunk_data = transport.receive_message(timeout=30.0)
-            if chunk_op != Opcodes.VAULT_DATA:
+            opcode, chunk_data = transport.receive_message(timeout=30.0)
+            if opcode != Opcodes.VAULT_DATA:
                 raise ValueError("Transfer aborted or wrong opcode")
             yield chunk_data
-            transport.send_message(Opcodes.ACQ_OK)
+            
+        transport.send_message(Opcodes.ACQ_OK)
 
     def _transit_stream(self, transport: SecureNetworkTransport, file_size: int):
         #generator yields a full incoming .tran vault from the network
@@ -242,6 +243,17 @@ class SyncWorker:
             received_bytes += len(chunk)
             yield chunk
             transport.send_message(Opcodes.ACQ_OK)
+
+    def _verify_dsa(self, peer_pub_key: bytes, expected_nonce: bytes, signature: bytes = None, payload: bytes = None):
+        try:
+            if payload is not None:
+                sign, peer_nonce = msgpack.unpackb(payload)
+                if self.my_identity.verify(expected_nonce + peer_nonce, sign, peer_pub_key):
+                    return peer_nonce
+                return None
+            return self.my_identity.verify(expected_nonce, signature, peer_pub_key)
+        except Exception:
+            return None if payload is not None else False
 
     #==========================================================
     def start(self):
@@ -281,37 +293,56 @@ class SyncWorker:
                     break
     
     #===========================================================================================================================
-    def _inbound_router(self, transport : SecureNetworkTransport):
-
-        opcode_received, peer_hash = transport.receive_message()
+    def _inbound_router(self, transport: SecureNetworkTransport):
+        opcode_received, payload = transport.receive_message()
         if opcode_received == Opcodes.NUKE_WIPE:
-            self._handle_nuclear_wipe(peer_hash)
-            import traceback
-            traceback.print_exc() #DEBUGG 
+            self._handle_nuclear_wipe(payload)
             return
-        
+
+        if opcode_received == Opcodes.TRUST_QRY:
+            peer_hash, client_nonce = msgpack.unpackb(payload, raw=False)
+        else:
+            peer_hash, client_nonce = payload, None
+
         if self.peers.check_if_compromised(peer_hash):
             wipe_payload = b"WIPE:" + peer_hash
             sig = self.my_identity.sign(wipe_payload)
             transport.send_message(Opcodes.NUKE_WIPE, msgpack.packb([self.my_pub_key, sig], use_bin_type=True))
             return
 
-        #==============PROTOCOL ROUTING===============
-        if opcode_received == Opcodes.TRUST_QRY:  #Attemps syncing
+        # ============== PROTOCOL ROUTING ==============
+        if opcode_received == Opcodes.TRUST_QRY:  # Phase 1: Trust Verification
             peer_data = self.peers.is_device_trusted(peer_hash, self.vault_id)
-            
 
             if peer_data:
-                if peer_data.get('is_paused') == 1:
-                    transport.send_message(Opcodes.SYNC_ERR)
-                    return
-                transport.send_message(Opcodes.TRUST_YES)
-                self._execute_sync_session(transport, peer_hash, is_client=False)
-            else:
-                transport.send_message(Opcodes.DEVC_RM)
-                raise SecurityError("Peer requested Syncing but device is not trusted")
+                server_nonce = os.urandom(32)
+                server_sig = self.my_identity.sign(client_nonce + server_nonce)
+                transport.send_message(
+                    Opcodes.TRUST_YES,
+                    msgpack.packb([server_sig, server_nonce], use_bin_type=True)
+                )
 
-        elif opcode_received == Opcodes.DSA_HASH:  #Attempts pairing
+                # Phase 2: Sync Request & Client Signature Verification
+                next_op, client_sig = transport.receive_message()
+                if next_op == Opcodes.SYNC_QRY:
+                    if not self._verify_dsa(peer_data['public_key'], server_nonce, signature=client_sig):
+                        transport.send_message(Opcodes.SYNC_ERR)
+                        raise SecurityError("Client failed ML-DSA-87 challenge verification")
+
+                    if peer_data.get('is_paused') == 1:
+                        transport.send_message(Opcodes.SYNC_ERR)
+                        return
+
+                    transport.send_message(Opcodes.SYNC_YES)
+                    self._execute_sync_session(transport, peer_hash, is_client=False)
+                else:
+                    transport.send_message(Opcodes.SYNC_ERR)
+                    raise SecurityError(f"Expected SYNC_QRY, got {next_op}")
+            else:
+                transport.send_message(Opcodes.DEVC_RM, self.my_identity.sign(client_nonce))
+                raise SecurityError("Peer requested verification but device is not trusted")
+
+        elif opcode_received == Opcodes.DSA_HASH:  # Attempts pairing
             peer_data = self.peers.is_device_trusted(peer_hash, self.vault_id)
 
             if not peer_data:
@@ -319,22 +350,18 @@ class SyncWorker:
                 transport.send_message(Opcodes.TRUST_NO)
                 self._execute_pairing_server(transport, peer_hash)
             elif peer_data:
-                transport.send_message(Opcodes.TRUST_YES)
-                recv_op, _ = transport.receive_message()
-                if recv_op == Opcodes.DEVC_RM:
+                server_nonce = os.urandom(32)
+                transport.send_message(Opcodes.TRUST_YES, server_nonce)
+                recv_op, rm_sig = transport.receive_message()
+                if recv_op == Opcodes.DEVC_RM and self._verify_dsa(peer_data['public_key'], server_nonce, signature=rm_sig):
                     self.peers.remove_peer(peer_hash, self.vault_id)
                     transport.send_message(Opcodes.TRUST_RM)
-                    #Bye Grace
                 else:
-                    raise SecurityError("Did not recieve a valid routing opcode")
+                    raise SecurityError("Invalid or spoofed DEVC_RM response")
             else:
                 raise SecurityError("Trusted Devices database compromised")
-        
-        elif opcode_received == Opcodes.DEVC_RM:
-            self.peers.remove_peer(peer_hash, self.vault_id)
-            transport.send_message(Opcodes.TRUST_RM)
         else:
-            raise ValueError("Did not recieve a valid routing opcode")
+            raise ValueError("Did not receive a valid routing opcode")
 
     def _route_inbound_connection(self, client_sock: socket.socket, addr: tuple):
         transport = SecureNetworkTransport(sock=client_sock)
@@ -356,34 +383,56 @@ class SyncWorker:
         if self.peers.check_if_compromised(expected_mdns_hash):
             wipe_payload = b"WIPE:" + expected_mdns_hash
             sig = self.my_identity.sign(wipe_payload)
-
             transport.send_message(Opcodes.NUKE_WIPE, msgpack.packb([self.my_pub_key, sig], use_bin_type=True))
             return "WIPED_PEER"
-        
+
         is_known = self.peers.is_device_trusted(expected_mdns_hash, self.vault_id)
 
-        #==========Routing Protocol=======================
+        # ========== Routing Protocol ==========
         if is_known:
             if is_known.get('is_paused') == 1:
                 print("[*] Sync is paused for this device.")
                 return "PAUSED"
-            transport.send_message(Opcodes.TRUST_QRY, pub_hash)
+
+            # Phase 1: Verify Trust
+            client_nonce = os.urandom(32)
+            transport.send_message(
+                Opcodes.TRUST_QRY,
+                msgpack.packb([pub_hash, client_nonce], use_bin_type=True)
+            )
             opcode, payload = transport.receive_message()
+
             if opcode == Opcodes.NUKE_WIPE:
-                import traceback
-                traceback.print_exc()  #DEBUGG
                 self._handle_nuclear_wipe(payload, expected_mdns_hash)
                 return "SELF_WIPED"
 
             if opcode == Opcodes.TRUST_YES:
-                self._execute_sync_session(transport, expected_mdns_hash, is_client=True)
-                return "SYNC_OK"
+                server_nonce = self._verify_dsa(is_known['public_key'], client_nonce, payload=payload)
+                if not server_nonce:
+                    raise SecurityError("Server failed ML-DSA-87 challenge verification!")
+
+                # Phase 2: Request Sync with signed server_nonce
+                transport.send_message(Opcodes.SYNC_QRY, self.my_identity.sign(server_nonce))
+                sync_op, _ = transport.receive_message()
+
+                if sync_op == Opcodes.SYNC_YES:
+                    self._execute_sync_session(transport, expected_mdns_hash, is_client=True)
+                    return "SYNC_OK"
+                elif sync_op == Opcodes.SYNC_ERR:
+                    print("[*] Peer rejected sync (paused or busy).")
+                    return "PAUSED"
+                else:
+                    raise SecurityError(f"Unexpected response to SYNC_QRY: {sync_op}")
+
             elif opcode == Opcodes.DEVC_RM:
+                if not self._verify_dsa(is_known['public_key'], client_nonce, signature=payload):
+                    raise SecurityError("Spoofed DEVC_RM rejected!")
                 self.peers.remove_peer(expected_mdns_hash, self.vault_id)
                 transport.send_message(Opcodes.TRUST_RM)
                 return "UNPAIRED_BY_PEER"
             else:
                 raise SecurityError(f"Invalid opcode at current stage: {opcode}")
+
         else:
             self._check_partner_slot(expected_mdns_hash)
             transport.send_message(Opcodes.DSA_HASH, pub_hash)
@@ -397,7 +446,7 @@ class SyncWorker:
                 self._execute_pairing_client(transport, expected_mdns_hash)
                 return "PAIRED_OK"
             elif opcode == Opcodes.TRUST_YES:
-                transport.send_message(Opcodes.DEVC_RM)
+                transport.send_message(Opcodes.DEVC_RM, self.my_identity.sign(payload))
                 opcode, _ = transport.receive_message()
                 if opcode == Opcodes.TRUST_RM:
                     return "UNPAIRED_BY_PEER"
@@ -406,7 +455,7 @@ class SyncWorker:
             elif opcode == Opcodes.PAIR_FULL:
                 raise SecurityError("Server vault is already paired with maximum devices!")
             else:
-                raise SecurityError(f"Invalid opcode at current stage: {opcode}")   
+                raise SecurityError(f"Invalid opcode at current stage: {opcode}")
     
     def _route_outbound_connection(self, target_ip: str, target_port: int, expected_mdns_hash: bytes):
         client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1051,21 +1100,16 @@ class SyncWorker:
                     ack, _ = transport.receive_message(timeout=10.0)
                     if ack != Opcodes.ACQ_OK:
                         continue 
-                        
-                    transfer_failed = False
+                    
                     for chunk in original_chunks:
                         with self.vault_manager.io_lock:
                             enc_bytes = self.vault_manager.vaultio.read_cargo(chunk['start'], chunk['end'])
                         transport.send_message(Opcodes.VAULT_DATA, enc_bytes)
                         
-                        chunk_ack, _ = transport.receive_message(timeout=10.0)
-                        if chunk_ack != Opcodes.ACQ_OK:
-                            transfer_failed = True
-                            break 
-                                
-                    if transfer_failed:
-                        print(f"[-] Peer aborted chunk transfer for {req_uuid.hex()[:8]}")
-                        
+                    final_ack, _ = transport.receive_message(timeout=10.0)
+                    if final_ack != Opcodes.ACQ_OK:
+                        print(f"[-] Peer failed to acknowledge full transfer for {req_uuid.hex()[:8]}")
+    
                 else:
                     transport.send_message(Opcodes.SYNC_ERR)
                     
@@ -1091,7 +1135,7 @@ class SyncWorker:
                 raise SecurityError("Nuclear Wipe rejected: unknown device!")
 
             expected_msg = b"WIPE:" + hashing.hash_key(self.my_pub_key)
-            if self.my_identity.verify(expected_msg, signature, server_pub_key):
+            if self._verify_dsa(server_pub_key, expected_msg, signature):
                 from modules.orchestrator import VaultDynamicManager
                 surgeon = VaultDynamicManager(self.vault_manager)
                 surgeon.execute_self_destruct()

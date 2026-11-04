@@ -108,10 +108,6 @@ class VaultManager:
             
             if hasattr(self, 'vaultdb') and self.vaultdb is not None: 
                 self.vaultdb.close_connection()
-                print(
-                            "[DEBUG] lock_vault() is deleting vaultdb",
-                            "| manager id =", id(self),
-                    ) #DEBUGG
                 del self.vaultdb
         
             if hasattr(self, 'os_lock_handle'):  

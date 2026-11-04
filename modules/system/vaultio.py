@@ -29,6 +29,7 @@ class VaultIO:
     @staticmethod
     def read_external_chunk(filepath, start_byte, end_byte):
         with open(filepath, 'rb') as rfile:
+            rfile.seek(start_byte)
             data = rfile.read(end_byte - start_byte)
             return data
     

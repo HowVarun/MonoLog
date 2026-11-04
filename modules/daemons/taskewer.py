@@ -60,13 +60,6 @@ class TaSkewer:
 
     def _dispatch(self, opcode: bytes, args: dict):
         """Routes opcodes strictly to their target methods."""
-        print(
-                "[DEBUG] opcode =", opcode,
-                "| manager id =", id(self.orchestrator),
-                "| vaultdb exists =", hasattr(self.orchestrator, "vaultdb"),
-                "| hashmap exists =", hasattr(self.orchestrator, "hashmap"),
-                "| dek exists =", hasattr(self.orchestrator, "dek"),
-            ) #DEBUGG
         
         # =====================================================================
         # CATEGORY Q1: EVERYDAY LOCAL I/O

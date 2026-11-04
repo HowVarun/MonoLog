@@ -30,13 +30,16 @@ class Opcodes:
 
 
     TRUST_QRY = b"I5000"  # "Am I still in your Trusted Devices database?"
-    TRUST_YES = b"I5001"  # "Yes, I recognize you. We can sync."
+    TRUST_YES = b"I5001"  # "Yes, I recognize you."
     TRUST_NO  = b"I5002"  # "No you are new or deleted device."
     
     DEVC_RM   = b"I5003"  # I have deleted/not found you in my trusted devices. Remove me.
     TRUST_RM  = b"I5004"  # I have successfully deleted your connection as per reqest
     TRUST_NF  = b"I5005"  # I don't have you in my trusted devices
     PAIR_FULL = B"I5006"  # I already have a sync partner, terminate pairing session
+
+    SYNC_QRY  = b"I5007"  # "I would like to sync"
+    SYNC_YES  = b"I5008"  # "Yes we can sync"
 
 
     # =========================================================================

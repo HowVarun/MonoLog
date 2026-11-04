@@ -160,8 +160,12 @@ def pick_directory(manager):
 def open_and_track_ghost_file(manager, uuid: bytes, v_ts: int):
     """Decrypts file via GhostFileIO, launches it, and pushes LOCAL_EDIT on close."""
     import hashlib
+    
     meta = manager.vaultdb.get_meta(uuid, v_ts)
     chunks = manager.hashmap.get_meta(uuid, v_ts)
+
+    
+    
     if not meta or not chunks:
         raise FileNotFoundError("File metadata or chunks missing in vault.")
 
@@ -175,6 +179,8 @@ def open_and_track_ghost_file(manager, uuid: bytes, v_ts: int):
             ct = manager.vaultio.read_cargo(chunk['start'], chunk['end'])
             pt = local_aes.decrypt_cipherstream(chunk['iv'], ct)
             ghost_io.write_decrypted_chunk(ghost_path, pt)
+
+
 
     # ADDED TRACKERS HERE
     with open(ghost_path, 'rb') as f:

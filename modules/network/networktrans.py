@@ -2,14 +2,26 @@ import struct
 import socket
 from modules.system import Opcodes
 
+onemb = 1024*1024
+
 class SecureNetworkTransport:
-    def __init__(self, sock: socket.socket = None, buffer_size: int = 65536):
+    def __init__(self, sock: socket.socket = None, buffer_size: int = onemb):
         if sock:
             self.sock = sock
         else:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             
         self.buffer = buffer_size
+
+    def _configure_socket(self):
+        try:
+            #disabling nagle's algorithm
+            self.sock.setsockopt(socket.IPROTO_TCP, socket.TCP_NODELAY, 1)
+            #xpanding os kernel sliding window
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4*onemb)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4*onemb)
+        except Exception as e:
+            print(f"Network configuration failed {e}")
 
     def send_message(self, opcode: bytes, data: bytes = b""):
         if len(opcode) != 5:
@@ -20,7 +32,12 @@ class SecureNetworkTransport:
         header = struct.pack(">I", payload_length)
         
         try:
-            self.sock.sendall(header + opcode + data)
+            # Coalesce small control packets; split large chunks to avoid 2 MB RAM copy
+            if payload_length <= 4096:
+                self.sock.sendall(header + data)
+            else:
+                self.sock.sendall(header)
+                self.sock.sendall(data)
         except Exception as e:
             print(f"[{Opcodes.ERR_NET.decode('utf-8')}] Transport failed to send message: {e}")
             raise ConnectionError()
@@ -37,7 +54,9 @@ class SecureNetworkTransport:
                 return Opcodes.BYE_FORCE, b""
                 
             payload_length = struct.unpack(">I", header_bytes)[0]
-            
+            if payload_length > 16*onemb:
+                raise ValueError(f"Payload length {payload_length} exceeds 16 MB safety limit.")
+
             opcode = self._recv_exactly(5)
             if not opcode:
                 print(f"[{Opcodes.BYE_FORCE.decode('utf-8')}] Peer disconnected during opcode read.")
@@ -45,7 +64,6 @@ class SecureNetworkTransport:
                 return Opcodes.BYE_FORCE, b""
 
             payload = self._recv_exactly(payload_length) if payload_length > 0 else b""
-            
             return opcode, payload
             
         except socket.timeout:
@@ -65,14 +83,15 @@ class SecureNetworkTransport:
                 self.sock.settimeout(None)
 
     def _recv_exactly(self, n: int) -> bytes:
-        data = bytearray()
-        while len(data) < n:
-            remaining = n - len(data)
-            chunk = self.sock.recv(min(self.buffer, remaining))
-            if not chunk:
-                return b"" 
-            data.extend(chunk)
-        return bytes(data)
+        buf = bytearray(n)
+        view = memoryview(buf)
+        pos = 0
+        while pos < n:
+            nbytes = self.sock.recv_into(view[pos:], min(self.buffer, n - pos))
+            if not nbytes:
+                return b""
+            pos += nbytes
+        return bytes(buf)
 
     def close_connection(self):
         try:
