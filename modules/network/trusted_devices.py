@@ -200,7 +200,7 @@ class TrustedDevicesDatabase:
                 cursor.execute(QUERY, (ml_dsa_hash, vault_id))
                 last_seen = cursor.fetchone()
 
-                return last_seen[0]
+                return last_seen[0] if last_seen else 0.0
         except sqlite3.Error:
-            return None
+            return 0.0
             

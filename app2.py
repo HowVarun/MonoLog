@@ -2,7 +2,8 @@ import os
 import time
 import traceback
 from modules.orchestrator import VaultManager
-from modules.daemons import SyncWorker, TaSkewer
+from modules.daemons import TaSkewer
+from modules.network import NetworkWorker
 from modules.system import LocalOpcodes
 from modules.crypto_core import hashing, AesGcm
 from modules.system.ghostfile import GhostFileIO  # Adjust import path if GhostFileIO is in another submodule
@@ -209,7 +210,7 @@ def open_and_track_ghost_file(manager, uuid: bytes, v_ts: int):
 # ==========================================
 # Peer Discovery & Trusted Device Manager
 # ==========================================
-def scan_and_connect_peer(worker: SyncWorker, is_clone_mode: bool = False):
+def scan_and_connect_peer(worker: NetworkWorker, is_clone_mode: bool = False):
     print("\n[*] Scanning local network for SecureVault peers via mDNS (5 seconds)...")
     peers = worker.discovery.scan_for_devices(scan_time_seconds=5)
     
@@ -263,7 +264,7 @@ def scan_and_connect_peer(worker: SyncWorker, is_clone_mode: bool = False):
     return True
 
 
-def manage_trusted_devices_menu(worker: SyncWorker):
+def manage_trusted_devices_menu(worker: NetworkWorker):
     while True:
         clear_screen()
         vault_id = worker.vault_id
@@ -482,7 +483,7 @@ def run_cli():
                 
                 # Instantiate unbooted VaultManager (dek is None -> triggers PRE_VAULT_SETUP & wants_clone=True)
                 temp_manager = VaultManager(active_vault_path)
-                worker = SyncWorker(temp_manager)
+                worker = NetworkWorker(temp_manager)
                 worker.start()
                 
                 try:
@@ -645,7 +646,7 @@ def run_cli():
                 
                 try:
                     # Capture current vault_id and peers BEFORE rotating the DEK changes the vault_id!
-                    temp_worker = SyncWorker(manager)
+                    temp_worker = NetworkWorker(manager)
                     temp_worker.peers.create_db() # Failsafe to ensure DB exists
                     old_vault_id = temp_worker.vault_id
                     paired_peers = temp_worker.peers.get_vault_peers(old_vault_id)
@@ -737,7 +738,7 @@ def run_cli():
 
             # 11. NETWORK SYNC, PAIRING & DEVICE MANAGER
             elif choice == '11':
-                worker = SyncWorker(manager)
+                worker = NetworkWorker(manager)
                 worker.start()
                 
                 try:

@@ -8,7 +8,7 @@ import tempfile
 
 from modules.crypto_core import MfaKdf, AesGcm, hashing
 from modules.vaultmap import VaultMap, VaultDatabase
-from modules.system import VaultIO, GhostFileIO, IDGenerator
+from modules.system import VaultIO, GhostFileIO, IDGenerator, TransferProgress
 from modules.daemons import SyncLedger
 
 class VaultManager:
@@ -19,6 +19,7 @@ class VaultManager:
         #==================================
         self.io_lock = threading.RLock()
         #==================================
+        self.progress = TransferProgress()
         self.lock_filepath = self.filepath + ".lock"
         self.os_lock_handle = open(self.lock_filepath, 'w')
         try:

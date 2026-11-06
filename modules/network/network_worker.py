@@ -8,6 +8,7 @@ import platform
 import threading
 import json
 import time
+import random
 import struct
 
 from modules.system import Opcodes, LocalOpcodes
@@ -19,7 +20,7 @@ from modules.crypto_core import hashing, SasPass, AesGcm, MLKEM
 class SecurityError(Exception):
     pass
 
-class SyncWorker:
+class NetworkWorker:
     def __init__(self, vault_manager ,port: int = 65432, storage_dir=None):
         #debugging and testing simultaneous machine operation
         node_id = int(os.getenv("SV_NODE", "1"))
@@ -53,6 +54,10 @@ class SyncWorker:
         #Pairing states
         self.ui_request_pin_cb = None
         self.ui_display_pin_cb = None
+
+        #Sync lock and pairing lock
+        self.sync_lock = threading.Lock()
+        self.pairing_mode = False
 
         #Vault clone setup
         self.ui_new_vault_creds_cb = None  # Returns (new_master_password, new_weak_pin)
@@ -155,6 +160,24 @@ class SyncWorker:
         print(f" PIN:  {pin}")
         print("="*38)
         print("[*] Waiting for peer to enter this PIN...")
+
+    def enable_pairing_mode(self):
+        #Turns on pairing mode in discovery
+        self.pairing_mode = True
+        self.discovery.set_identity(self.my_pub_key, self.port)
+        self.discovery.stop_sync_beacon()
+        self.discovery.start_pairing_beacon()
+        print("[*] Pairing Mode ENABLED. Vault is visible to new devices.")
+
+    def disable_pairing_mode(self):
+        self.pairing_mode = False
+        self.discovery.stop_pairing_beacon()
+        
+        if self.is_running:
+            self.discovery.start_sync_beacon()
+            print("[*] Pairing Mode DISABLED. Background mesh resumed.")
+        else:
+            print("[*] Pairing Mode DISABLED. (Worker is shutting down, sync beacon remains off).")
     
 
     #==========================================================
@@ -227,12 +250,18 @@ class SyncWorker:
 
     def _sync_file_stream(self, transport: SecureNetworkTransport, total_chunks: int):
         #generator yields incoming file chunks from the network
-        for _ in range(total_chunks): 
+        for _ in range(total_chunks):
             opcode, chunk_data = transport.receive_message(timeout=30.0)
-            if opcode != Opcodes.VAULT_DATA:
-                raise ValueError("Transfer aborted or wrong opcode")
-            yield chunk_data
+            if opcode != Opcodes.VAULT_DATA or not chunk_data:
+                raise ConnectionError(f"Expected VAULT_DATA during stream, got {opcode}")
             
+            # Update progress immediately after receiving
+            if hasattr(self, 'vault_manager') and self.vault_manager.progress.active:
+                self.vault_manager.progress.add_bytes(len(chunk_data))
+                
+            yield chunk_data
+
+        # Sent only after VaultIO.write_cargo has written every yielded chunk to .temp
         transport.send_message(Opcodes.ACQ_OK)
 
     def _transit_stream(self, transport: SecureNetworkTransport, file_size: int):
@@ -244,16 +273,11 @@ class SyncWorker:
             yield chunk
             transport.send_message(Opcodes.ACQ_OK)
 
-    def _verify_dsa(self, peer_pub_key: bytes, expected_nonce: bytes, signature: bytes = None, payload: bytes = None):
+    def _verify_dsa(self, peer_pub_key: bytes, expected_message: bytes, signature: bytes) -> bool:
         try:
-            if payload is not None:
-                sign, peer_nonce = msgpack.unpackb(payload)
-                if self.my_identity.verify(expected_nonce + peer_nonce, sign, peer_pub_key):
-                    return peer_nonce
-                return None
-            return self.my_identity.verify(expected_nonce, signature, peer_pub_key)
+            return self.my_identity.verify(expected_message, signature, peer_pub_key)
         except Exception:
-            return None if payload is not None else False
+            return False
 
     #==========================================================
     def start(self):
@@ -315,25 +339,36 @@ class SyncWorker:
             peer_data = self.peers.is_device_trusted(peer_hash, self.vault_id)
 
             if peer_data:
+                if peer_data.get('is_paused') == 1:
+                    transport.send_message(Opcodes.SYNC_ERR)
+                    return
+                #phase1 : generate the ml-kem keypair then sign and send
                 server_nonce = os.urandom(32)
-                server_sig = self.my_identity.sign(client_nonce + server_nonce)
+                temp_mlkem = MLKEM()
+                kem_pub_server = temp_mlkem.generate_key("pub")
+                #signing and sending
+                expected_msg = client_nonce + server_nonce + kem_pub_server
+                server_sig = self.my_identity.sign(expected_msg)
                 transport.send_message(
                     Opcodes.TRUST_YES,
-                    msgpack.packb([server_sig, server_nonce], use_bin_type=True)
+                    msgpack.packb([server_sig, server_nonce, kem_pub_server], use_bin_type=True)
                 )
 
-                # Phase 2: Sync Request & Client Signature Verification
-                next_op, client_sig = transport.receive_message()
+                #phase2: sync request & client signature verification
+                next_op, payload = transport.receive_message()
                 if next_op == Opcodes.SYNC_QRY:
-                    if not self._verify_dsa(peer_data['public_key'], server_nonce, signature=client_sig):
+                    client_sig, ciph2 = msgpack.unpackb(payload, raw = False)
+                    if not self._verify_dsa(peer_data['ml_dsa_pub_key'], server_nonce + ciph2, client_sig):
                         transport.send_message(Opcodes.SYNC_ERR)
                         raise SecurityError("Client failed ML-DSA-87 challenge verification")
 
-                    if peer_data.get('is_paused') == 1:
-                        transport.send_message(Opcodes.SYNC_ERR)
-                        return
+                    try:
+                        session_key = temp_mlkem.decapsulate(ciph2)
+                    except Exception as e:
+                        raise SecurityError("Client did not send valid ML-KEM key")
 
                     transport.send_message(Opcodes.SYNC_YES)
+                    transport.enable_tunnel_encryption(session_key)
                     self._execute_sync_session(transport, peer_hash, is_client=False)
                 else:
                     transport.send_message(Opcodes.SYNC_ERR)
@@ -346,6 +381,10 @@ class SyncWorker:
             peer_data = self.peers.is_device_trusted(peer_hash, self.vault_id)
 
             if not peer_data:
+                if not self.pairing_mode:
+                    transport.send_message(Opcodes.SYNC_ERR)
+                    return
+                
                 self._check_partner_slot(peer_hash, transport)
                 transport.send_message(Opcodes.TRUST_NO)
                 self._execute_pairing_server(transport, peer_hash)
@@ -353,7 +392,7 @@ class SyncWorker:
                 server_nonce = os.urandom(32)
                 transport.send_message(Opcodes.TRUST_YES, server_nonce)
                 recv_op, rm_sig = transport.receive_message()
-                if recv_op == Opcodes.DEVC_RM and self._verify_dsa(peer_data['public_key'], server_nonce, signature=rm_sig):
+                if recv_op == Opcodes.DEVC_RM and self._verify_dsa(peer_data['ml_dsa_pub_key'], server_nonce, rm_sig):
                     self.peers.remove_peer(peer_hash, self.vault_id)
                     transport.send_message(Opcodes.TRUST_RM)
                 else:
@@ -364,8 +403,12 @@ class SyncWorker:
             raise ValueError("Did not receive a valid routing opcode")
 
     def _route_inbound_connection(self, client_sock: socket.socket, addr: tuple):
+        if not self.sync_lock.acquire(blocking=False):
+            print(f"[*] Busy: Rejected inbound connection from {addr[0]}.")
+            client_sock.close()
+            return
+
         transport = SecureNetworkTransport(sock=client_sock)
-        
         try:
             ping_bytes = self._opcode_check(transport.receive_message(), Opcodes.PING, transport)
             transport.send_message(Opcodes.PONG, ping_bytes)
@@ -375,6 +418,7 @@ class SyncWorker:
             print(f"[{Opcodes.ERR_FATAL.decode('utf-8')}] Routing failure with {addr[0]}: {e}")
         finally:
             transport.close_connection()
+            self.sync_lock.release()
             
     #===========================================================================================================================
     def _outbound_router(self, transport: SecureNetworkTransport, expected_mdns_hash: bytes):
@@ -406,16 +450,33 @@ class SyncWorker:
                 self._handle_nuclear_wipe(payload, expected_mdns_hash)
                 return "SELF_WIPED"
 
+            if opcode == Opcodes.SYNC_ERR:
+                print("[*] Peer is not accepting pairing requests right now.")
+                return "PAIR_REJECTED"
+            
+
             if opcode == Opcodes.TRUST_YES:
-                server_nonce = self._verify_dsa(is_known['public_key'], client_nonce, payload=payload)
-                if not server_nonce:
+                server_sig, server_nonce, kem_pub_server = msgpack.unpackb(payload, raw=False)
+                expected_msg = client_nonce + server_nonce + kem_pub_server
+
+                if not self._verify_dsa(is_known['ml_dsa_pub_key'], expected_msg, server_sig):
                     raise SecurityError("Server failed ML-DSA-87 challenge verification!")
+                
+                temp_mlkem = MLKEM()
+                kem_pub_client = temp_mlkem.generate_key("pub")
+                ciph, session_key = temp_mlkem.encapsulate(kem_pub_server)
+
+                client_sig = self.my_identity.sign(server_nonce + ciph)
 
                 # Phase 2: Request Sync with signed server_nonce
-                transport.send_message(Opcodes.SYNC_QRY, self.my_identity.sign(server_nonce))
+                transport.send_message(
+                    Opcodes.SYNC_QRY,
+                    msgpack.packb([client_sig, ciph], use_bin_type = True ))
+                
                 sync_op, _ = transport.receive_message()
 
                 if sync_op == Opcodes.SYNC_YES:
+                    transport.enable_tunnel_encryption(session_key)
                     self._execute_sync_session(transport, expected_mdns_hash, is_client=True)
                     return "SYNC_OK"
                 elif sync_op == Opcodes.SYNC_ERR:
@@ -425,7 +486,7 @@ class SyncWorker:
                     raise SecurityError(f"Unexpected response to SYNC_QRY: {sync_op}")
 
             elif opcode == Opcodes.DEVC_RM:
-                if not self._verify_dsa(is_known['public_key'], client_nonce, signature=payload):
+                if not self._verify_dsa(is_known['ml_dsa_pub_key'], client_nonce, signature = payload):
                     raise SecurityError("Spoofed DEVC_RM rejected!")
                 self.peers.remove_peer(expected_mdns_hash, self.vault_id)
                 transport.send_message(Opcodes.TRUST_RM)
@@ -458,6 +519,9 @@ class SyncWorker:
                 raise SecurityError(f"Invalid opcode at current stage: {opcode}")
     
     def _route_outbound_connection(self, target_ip: str, target_port: int, expected_mdns_hash: bytes):
+        if not self.sync_lock.acquire(blocking=False):
+            print("[*] Busy: Sync already in progress.")
+            return "BUSY"
         client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         transport = None
 
@@ -478,6 +542,9 @@ class SyncWorker:
         finally:
             if transport:
                 transport.close_connection()
+            else:
+                client_sock.close()
+            self.sync_lock.release()
 
     #===========================================================================================================================
     def _execute_pairing_server(self, transport : SecureNetworkTransport, peer_hash):
@@ -987,11 +1054,24 @@ class SyncWorker:
                     elif header_file.get("type") == "data_header":
                         transport.send_message(Opcodes.ACQ_OK)
                         
-                        # Delegate temp file streaming to VaultManager (orchestrator)
-                        tmp_path = self.vault_manager.download_temp_file(
-                            self._sync_file_stream(transport, header_file["total_chunks"]), 
-                            self.dir
-                        )
+                        #1. Calculate total bytes from the incoming hashmap
+                        incoming_hashmap = header_file["hashmap"]
+                        total_bytes = sum(c["end"] - c["start"] for c in incoming_hashmap)
+                        filename = os.path.basename(header_file["v_path"])
+
+                        # 2. Turn on the progress bar before starting the stream
+                        self.vault_manager.progress.start_transfer(filename, total_bytes, "Downloading")
+
+                        try:
+                            # Delegate temp file streaming to VaultManager (orchestrator)
+                            # (No changes to inputs!)
+                            tmp_path = self.vault_manager.download_temp_file(
+                                self._sync_file_stream(transport, header_file["total_chunks"]), 
+                                self.dir
+                            )
+                        finally:
+                            # 3. Turn off the progress bar safely
+                            self.vault_manager.progress.end_transfer()
 
                         # Asymmetric resolution: If we only needed data (our local rename is newer),
                         # preserve our local virtual_path and local meta_ts!
@@ -1032,7 +1112,7 @@ class SyncWorker:
         # 4. FLUSH DISK QUEUE BEFORE HANDING TURN TO PEER
         if self.skewer:
             self.skewer.task_queue.join()
-        print("[*] Local pull complete. Handing turn over to peer.")
+        # print("[*] Local pull complete. Handing turn over to peer.")
         transport.send_message(Opcodes.SYNC_NUL)
 
 
@@ -1100,18 +1180,26 @@ class SyncWorker:
                     ack, _ = transport.receive_message(timeout=10.0)
                     if ack != Opcodes.ACQ_OK:
                         continue 
+
+                    #Progress Bar
+                    total_bytes = sum((c['end'] - c['start']) for c in original_chunks)
+                    self.vault_manager.progress.start_transfer(meta['virtual_path'], total_bytes, "Uploading")
+
+                    try:
+                        for chunk in original_chunks:
+                            with self.vault_manager.io_lock:
+                                enc_bytes = self.vault_manager.vaultio.read_cargo(chunk['start'], chunk['end'])
+                            
+                            transport.send_message(Opcodes.VAULT_DATA, enc_bytes)
+                            # Update progress immediately after sending
+                            self.vault_manager.progress.add_bytes(len(enc_bytes))
+
+                        final_ack, _ = transport.receive_message(timeout=10.0)
+                        if final_ack != Opcodes.ACQ_OK:
+                            print(f"[-] Peer failed to acknowledge full transfer for {req_uuid.hex()[:8]}")
                     
-                    for chunk in original_chunks:
-                        with self.vault_manager.io_lock:
-                            enc_bytes = self.vault_manager.vaultio.read_cargo(chunk['start'], chunk['end'])
-                        transport.send_message(Opcodes.VAULT_DATA, enc_bytes)
-                        
-                    final_ack, _ = transport.receive_message(timeout=10.0)
-                    if final_ack != Opcodes.ACQ_OK:
-                        print(f"[-] Peer failed to acknowledge full transfer for {req_uuid.hex()[:8]}")
-    
-                else:
-                    transport.send_message(Opcodes.SYNC_ERR)
+                    finally:
+                        self.vault_manager.progress.end_transfer()
                     
             except Exception as e:
                 print(f"[-] Error serving request for {req_uuid.hex()[:8]}: {e}")
