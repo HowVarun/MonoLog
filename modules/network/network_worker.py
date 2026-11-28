@@ -265,13 +265,25 @@ class NetworkWorker:
         transport.send_message(Opcodes.ACQ_OK)
 
     def _transit_stream(self, transport: SecureNetworkTransport, file_size: int):
-        #generator yields a full incoming .tran vault from the network
         received_bytes = 0
-        while received_bytes < file_size:
-            chunk = self._opcode_check(transport.receive_message(timeout=30.0), Opcodes.VAULT_DATA, transport)
-            received_bytes += len(chunk)
-            yield chunk
-            transport.send_message(Opcodes.ACQ_OK)
+        
+        # Start the UI progress bar!
+        if hasattr(self.vault_manager, 'progress'):
+            self.vault_manager.progress.start_transfer("Vault Clone", file_size, "Downloading")
+            
+        try:
+            while received_bytes < file_size:
+                chunk = self._opcode_check(transport.receive_message(timeout=30.0), Opcodes.VAULT_DATA, transport)
+                received_bytes += len(chunk)
+                
+                # Update the UI
+                if hasattr(self.vault_manager, 'progress'):
+                    self.vault_manager.progress.add_bytes(len(chunk))
+                    
+                yield chunk
+        finally:
+            if hasattr(self.vault_manager, 'progress'):
+                self.vault_manager.progress.end_transfer()
 
     def _verify_dsa(self, peer_pub_key: bytes, expected_message: bytes, signature: bytes) -> bool:
         try:
@@ -403,12 +415,15 @@ class NetworkWorker:
             raise ValueError("Did not receive a valid routing opcode")
 
     def _route_inbound_connection(self, client_sock: socket.socket, addr: tuple):
+        transport = SecureNetworkTransport(sock=client_sock)
         if not self.sync_lock.acquire(blocking=False):
             print(f"[*] Busy: Rejected inbound connection from {addr[0]}.")
+            try:
+                transport.send_message(Opcodes.BYE_FORCE)
+            except Exception:
+                pass  
             client_sock.close()
             return
-
-        transport = SecureNetworkTransport(sock=client_sock)
         try:
             ping_bytes = self._opcode_check(transport.receive_message(), Opcodes.PING, transport)
             transport.send_message(Opcodes.PONG, ping_bytes)
@@ -624,7 +639,8 @@ class NetworkWorker:
                         # 3. Stream the Vault
                         for chunk in surgeon.stream_transit_vault(transit_path):
                             transport.send_message(Opcodes.VAULT_DATA, chunk)
-                            self._opcode_check(transport.receive_message(timeout=30.0), Opcodes.ACQ_OK, transport)
+                            
+                        self._opcode_check(transport.receive_message(timeout=30.0), Opcodes.ACQ_OK, transport)
                             
                         os.remove(transit_path)
                         shared_secret[:] = b'\x00' * 32
@@ -744,7 +760,7 @@ class NetworkWorker:
                         received_tmp_path, 
                         self._transit_stream(transport, file_size)
                     )
-
+                    transport.send_message(Opcodes.ACQ_OK)
                     transport.send_message(Opcodes.BYE_GRACE)
 
                     print("\n" + "="*38)

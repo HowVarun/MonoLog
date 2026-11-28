@@ -23,6 +23,11 @@ class VaultManager:
         self.lock_filepath = self.filepath + ".lock"
         self.os_lock_handle = open(self.lock_filepath, 'w')
         try:
+            if os.path.exists(self.lock_filepath):
+                os.remove(self.lock_filepath)
+        except OSError:
+            pass
+        try:
             portalocker.lock(self.os_lock_handle, portalocker.LOCK_EX | portalocker.LOCK_NB)
             
             self.os_lock_handle.write("Your Vault is locked by Secure Vault")

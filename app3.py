@@ -486,8 +486,8 @@ def run_cli():
                 mp = input("Enter Master Password: ")
                 wp = input("Enter Weak PIN: ")
                 
-                manager = VaultManager(active_vault_path)
                 try:
+                    manager = VaultManager(active_vault_path)
                     manager.create_new_vault(mp, wp)
                     start_vault_services(manager)
                     input("\n[+] Vault created, unlocked, and 24/7 Auto-Sync started! Press Enter.")
@@ -516,8 +516,9 @@ def run_cli():
                 mp = input("Enter Master Password: ")
                 wp = input("Enter Weak PIN: ")
                 
-                manager = VaultManager(active_vault_path)
+                
                 try:
+                    manager = VaultManager(active_vault_path)
                     manager.unlock_hash(mp, wp)
                     manager.boot_vault()
                     start_vault_services(manager)
@@ -535,9 +536,14 @@ def run_cli():
                 if not path.endswith('.scaf'):
                     path += '.scaf'
                 active_vault_path = os.path.join(vaults_dir, path)
-                
-                temp_manager = VaultManager(active_vault_path)
-                temp_manager.progress = TransferProgress()
+
+                try:
+                    temp_manager = VaultManager(active_vault_path)
+                    temp_manager.progress = TransferProgress()
+                except Exception as e:
+                    print(f"\n[!] Error unlocking vault: {e}")
+                    manager = None
+                    time.sleep(2)
                 
                 # DYNAMIC PORT FIX FOR CLONING:
                 node_id = int(os.getenv("SV_NODE", "1"))
@@ -580,12 +586,26 @@ def run_cli():
                 
                 target_dir = pick_directory(manager)
                 if target_dir:
-                    default_name = os.path.basename(source)
-                    v_name = input(f"\nEnter filename for vault (Leave blank to use '{default_name}'): ").strip()
-                    if not v_name:
-                        v_name = default_name
+                    default_name, ext = os.path.splitext(os.path.basename(source))
+                    user_input = input(f"\nEnter filename [w/o extension] (Leave blank to use '{default_name + ext}'): ").strip()
+                    
+                    if not user_input:
+                        # User left it blank; use original name and extension
+                        v_name = default_name + ext
+                    else:
+                        input_name, input_ext = os.path.splitext(user_input)
                         
+                        if input_ext == "":
+                            v_name = user_input + ext
+                        elif input_ext != ext:
+                    
+                            print(f"[*] Note: Changed file extension from '{ext}' to '{input_ext}'")
+                            v_name = user_input
+                        else:
+                            v_name = user_input
+                            
                     v_path = target_dir + v_name
+
                     try:
                         manager.skewer.push(
                             LocalOpcodes.LOCAL_INGEST,
@@ -814,7 +834,6 @@ def run_cli():
                         break
                     elif net_choice == '1':
                         worker.enable_pairing_mode()
-                        print("\n[*] PAIRING BEACON ACTIVE (_monolog-pair._tcp.local.)")
                         print("[*] Waiting up to 10 minutes for incoming Pair / Clone / Sync...")
                         print("[*] (Press Ctrl+C to exit Pairing Mode early)")
                         start_t = time.time()
@@ -828,7 +847,7 @@ def run_cli():
                             worker.disable_pairing_mode()
                             input("Press Enter to continue.")
                     elif net_choice == '2':
-                        scan_and_connect_peer(worker, is_pair_mode=False)
+                        scan_and_connect_peer(worker, is_pair_mode=True)
                         input("\n[*] Network operation finished. Press Enter to continue.")
                     elif net_choice == '3':
                         manage_trusted_devices_menu(worker)

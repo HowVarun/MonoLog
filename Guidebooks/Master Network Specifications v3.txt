@@ -1,0 +1,265 @@
+=============================================================================
+MonoLog - MASTER NETWORK PROTOCOL SPECIFICATION v3.0
+=============================================================================
+
+PRINCIPLES OF THE ENGINE
+
+[PRINCIPLE 1] Exact Wire Framing
+Every message sent across the raw TCP socket MUST follow this exact byte layout:
+[4-Byte Big-Endian Unsigned Int: Payload Length (N)] + [5-Byte Opcode] + [N-Byte Payload]
+The 4-byte integer strictly measures the length of the payload excluding the 
+4-byte header and the 5-byte opcode[cite: 3]. The receiver loops until exact byte 
+boundaries are read, preventing TCP stream truncation or MTU fragmentation.
+
+[PRINCIPLE 2] Categorical 5-Byte Opcodes
+All raw packets carry an exact 5-byte ASCII Opcode formatted as [1 Letter] + [4 Digits]:
+  R = Routing & Flow Control
+  I = Identity, Trust & Pairing
+  K = Post-Quantum Key Encapsulation & Vault Cloning
+  S = Sync Session Control
+  V = Vault Data & Metadata Operations
+  X = Session Teardown
+  E = Transport & Protocol Errors
+
+[PRINCIPLE 3] Strict 1-to-1 Vault-Bound Topology (MVP Enforcement)
+  1. Authenticated Host Rule: A node CANNOT broadcast via mDNS or accept 
+     incoming pairing/sync connections unless a Vault (.scaf) is actively 
+     unlocked in memory with its Master Password and Weak PIN[cite: 6].
+  2. Single-Partner Lock: In v3.0, a Vault may bind to at most ONE trusted 
+     peer device at a time. To pair a new device, the user MUST first run a 
+     final sync and explicitly execute a Mutual or Unilateral Unpair ([I5003] DEVC_RM)[cite: 3].
+  3. Dual-Layer Trust Binding: Every connection is verified at two levels:
+     - Device Level: Persistent ML-DSA-87 Public Key & SHA3-256 Fingerprint[cite: 4].
+     - Vault Level: Zero-knowledge VAULT_ID derived via SHA3-256("MONOLOG_VAULT_ID:" || DEK).
+     Two paired devices with different vaults open MUST immediately abort sync 
+     to prevent cross-vault DEK corruption.
+
+[PRINCIPLE 4] Call-and-Response & Flow-Control Enforcement
+Every control packet and file chunk requires an explicit acknowledgment ([R2000] 
+ACK_OK or [V2000] ACQ_OK) within the socket timeout window (5.0s for control, 
+30.0s for bulk chunks, 60.0s for human SAS PIN input). Any unexpected opcode 
+immediately triggers a fail opcode response and a forced disconnect ([X1000] BYE_FORCE)[cite: 3, 11].
+
+[PRINCIPLE 5] The "Zero-Trace" Memory & Disk Fallback
+If a connection drops or aborts mid-transfer, all temporary chunk files in the 
+staging directory MUST be removed in a strict `finally` block[cite: 6]. All mutable 
+cryptographic bytearrays (`dek`, `kek_hash`, `pvt_key_bytes`) MUST be zero-wiped 
+in RAM via `array[:] = b'\x00' * len(array)` immediately after use[cite: 4, 6, 12].
+
+=============================================================================
+SECTION 1: THE MASTER OPCODE DICTIONARY (v3.0)
+
+[CATEGORY A] Routing & Transport Flow Control (R)
+[R1000] PING:       Outbound liveness challenge (Payload: 8-byte os.urandom)[cite: 3].
+[R1001] PONG:       Inbound liveness echo (Payload: 8-byte echoed bytes)[cite: 3].
+[R2000] ACK_OK:     General transport-level positive acknowledgment[cite: 3].
+[R2001] ACK_FAIL:   General transport-level rejection[cite: 3].
+
+[CATEGORY B] Identity, Trust & Pairing (I)
+[I1000] DSA_HASH:   32-byte raw SHA3-256 digest of the peer's ML-DSA-87 public key[cite: 3].
+[I1001] HASH_ERR:   Public key digest does not match expected mDNS or socket hash[cite: 3].
+[I2000] DSA_PUB:    Raw 2,592-byte ML-DSA-87 Public Key[cite: 3].
+[I2001] PUB_ERR:    Malformed or invalid ML-DSA-87 Public Key[cite: 3].
+[I3000] DEVC_ID:    UTF-8 JSON payload: {"device_name", "device_type", "app_version", "vault_id"}[cite: 3].
+[I3001] ID_ERR:     Malformed metadata JSON or mismatched protocol version[cite: 3].
+[I4000] AUTH_PASS:  6-digit SAS PIN verification succeeded[cite: 3].
+[I4001] AUTH_FAIL:  6-digit SAS PIN verification failed[cite: 3].
+[I5000] TRUST_QRY:  Fast-path inquiry for previously paired devices (Payload: 32-byte DSA_HASH)[cite: 3].
+[I5001] TRUST_YES:  Peer device is recognized in TrustedDevicesDatabase[cite: 3].
+[I5002] TRUST_NO:   Peer device is unknown; transition to Pairing Room[cite: 3].
+[I5003] DEVC_RM:    Unilateral trust revocation / unpair signal[cite: 3].
+[I5004] TRUST_RM:   Acknowledgment of trust removal from local SQLite database[cite: 3].
+[I5005] PAIR_FULL:  Server already has an active paired partner; pairing rejected.
+
+[CATEGORY C] Post-Quantum Vault Cloning (K)
+[K1000] KEM_PUB:    Client's ephemeral 1,568-byte ML-KEM-1024 Public Key.
+[K1001] KEM_CIPH:   Server's ML-KEM-1024 Ciphertext + AES-GCM wrapped Vault DEK & Header.
+[K2000] CLONE_OK:   Client successfully initialized local .scaf container with shared DEK.
+
+[CATEGORY D] Sync Session Control (S)
+[S1000] SYNCO:      Sync session initiation (Payload: 32-byte VAULT_ID)[cite: 3].
+[S2000] SYNC_LDG:   MessagePack serialized Unsynced Ledger dictionary[cite: 3].
+[S2001] SYNC_DLT:   Mid-session Delta Ledger for newly minted conflict UUIDs.
+[S3000] SYNC_NUL:   End-of-turn marker; hands pull authority to the peer[cite: 3].
+[S9999] SYNC_ERR:   Requested UUID unavailable, invalid action, or Vault ID mismatch[cite: 3].
+
+[CATEGORY E] Vault Data & Metadata Operations (V)
+[V1000] SYNC_REQ:   Pull Request (Payload: [16-byte UUID] + [1-byte force_full flag])[cite: 3].
+[V2000] ACQ_OK:     Chunk or metadata header receipt confirmed[cite: 3].
+[V2001] ACQ_FAIL:   Chunk transfer corrupted or aborted[cite: 3].
+[V3000] VAULT_META: MessagePack dictionary ("type": "rename" or "type": "data_header")[cite: 3].
+[V4000] VAULT_DATA: Raw AES-GCM encrypted file chunk read directly from .scaf cargo[cite: 3].
+
+[CATEGORY F] Teardown & Diagnostics (X / E)
+[X0000] BYE_GRACE:  Clean session completion and socket closure[cite: 3].
+[X1000] BYE_FORCE:  Immediate abort due to security or protocol violation[cite: 3].
+[E4000] ERR_NET:    Socket timeout or connection reset.
+[E5000] ERR_PARSE:  Struct unpack or opcode framing error.
+[E9999] ERR_FATAL:  Fatal security or runtime exception[cite: 3].
+
+=============================================================================
+SECTION 2: DISCOVERY, 1-TO-1 PAIRING & VAULT CLONING
+
+PART 1: Authenticated mDNS Discovery & Liveness
+-----------------------------------------------
+1. Server Prerequisite: Alice (Host) MUST unlock her `.scaf` vault first[cite: 6]. Once 
+   unlocked, `SyncWorker.start()` caches her `ML-DSA-87` public key in memory 
+   and broadcasts `_securevault._tcp.local.` via mDNS containing:
+   - `ML-DSA-HASH`: 64-byte UTF-8 hex string of `SHA3-256(dsa_pub_key)`.
+2. Self-Discovery Filter: When scanning, any node MUST ignore mDNS records where 
+    both `discovered_ip == local_ip` and `discovered_port == local_port`.
+3. Liveness Handshake: Bob (Client) connects via TCP and sends `[R1000] PING` 
+   with 8 random bytes (`os.urandom(8)`). Alice replies `[R1001] PONG` with the 
+   identical 8 bytes. Bob verifies equality before proceeding[cite: 3, 11].
+
+PART 2: Trust Routing & The 1-to-1 Partner Lock
+-----------------------------------------------
+1. Single-Partner Check: Before entering the Pairing Room, Alice checks her 
+   `TrustedDevicesDatabase` for the active `VAULT_ID`. If a different device is 
+   already paired to this vault, Alice transmits `[I5005] PAIR_FULL` and closes 
+   with `[X1000] BYE_FORCE`. Alice must explicitly unpair the old device first.
+2. Dual-Path Routing:
+   * PATH A (Known Peer): If Bob recognizes Alice's `(ML-DSA-HASH, VAULT_ID)`, 
+     Bob sends `[I5000] TRUST_QRY` with his 32-byte raw `DSA_HASH`[cite: 3, 11].
+     - If Alice trusts Bob for this vault, she replies `[I5001] TRUST_YES` 
+       (exactly once) -> Proceed to Section 3 (Sync Session)[cite: 3, 11].
+     - If Alice removed Bob, she replies `[I5003] DEVC_RM`. Bob deletes Alice 
+       from his database, replies `[I5004] TRUST_RM` -> Enter Pairing Room[cite: 3, 11].
+   * PATH B (New Peer / Unauthenticated Client Clone): Bob sends `[I1000] DSA_HASH`[cite: 3, 11].
+     - If Alice has an open partner slot, she replies `[I5002] TRUST_NO` -> 
+       Enter Pairing Room[cite: 3, 11].
+     - If Alice still holds stale trust records for Bob, she replies `[I5001] TRUST_YES`. 
+       Bob sends `[I5003] DEVC_RM` to clear Alice's stale record, Alice replies 
+       `[I5004] TRUST_RM` -> Enter Pairing Room[cite: 3, 11].
+
+PART 3: The Pairing Room & ML-KEM-1024 Vault Cloning
+----------------------------------------------------
+A Client (Bob) may enter the Pairing Room WITHOUT an existing vault open in 
+order to clone Alice's vault and bind to it:
+
+1. Public Key Swap & Constant-Time Hash Check:
+   - Bob sends `[I2000] DSA_PUB` (2,592 bytes). Alice sends `[I2000] DSA_PUB`[cite: 3, 11].
+   - Alice verifies `hmac.compare_digest(SHA3_256(Bob_Pub), Bob_Hash)`.
+   - Bob verifies `hmac.compare_digest(SHA3_256(Alice_Pub), Expected_mDNS_Hash)`.
+   - On mismatch, fire `[I1001] HASH_ERR` and terminate[cite: 3, 11].
+2. Device & Vault Metadata Swap:
+   - Bob sends `[I3000] DEVC_ID` JSON[cite: 3, 11].
+   - Alice replies with `[I3000] DEVC_ID` JSON including her active `vault_id`[cite: 3, 11].
+3. Short Authentication String (SAS PIN) Verification:
+   - Both nodes compute the 6-digit PIN deterministically in identical key order:
+     `PIN = SasPass.derive_pass(Alice_Server_Key, Bob_Client_Key)`[cite: 3, 11].
+   - Bob displays the 6-digit PIN on screen[cite: 3, 11].
+   - Alice prompts the user to input the PIN shown on Bob's screen and checks 
+     `SasPass.verify_pass(input_pin, Alice_Server_Key, Bob_Client_Key)`[cite: 3, 11].
+   - If invalid, Alice sends `[I4001] AUTH_FAIL` and aborts[cite: 3, 11].
+   - If valid, Alice sends `[I4000] AUTH_PASS`, Bob echoes `[I4000] AUTH_PASS`[cite: 3, 11].
+4. Post-Quantum DEK Handshake (Initial Vault Provisioning):
+   - If Bob is joining Alice's vault for the first time, Bob generates an 
+     ephemeral `ML-KEM-1024` keypair and sends `[K1000] KEM_PUB` (1,568 bytes).
+   - Alice encapsulates a shared secret `(kem_cipher, shared_secret)` using 
+     Bob's `KEM_PUB`, derives a one-time transport key from `shared_secret`, 
+     encrypts her Vault's 32-byte `DEK` via AES-GCM, and sends `[K1001] KEM_CIPH`.
+   - Bob decapsulates `shared_secret`, decrypts the Vault `DEK`, prompts his 
+     local user to create a local Master Password + Weak PIN (`MfaKdf` -> `KEK`)[cite: 6], 
+     and initializes a local `.scaf` container locking the shared `DEK` inside 
+     Bob's own `KEK` lockbox[cite: 6].
+   - Both nodes record `(peer_dsa_hash, vault_id, peer_dsa_pub_key)` in 
+     `TrustedDevicesDatabase` and close pairing with `[X0000] BYE_GRACE`, or 
+     proceed directly into an initial full sync[cite: 3, 11].
+
+=============================================================================
+SECTION 3: THE SYNC PROTOCOL (VAULT-BOUND TURN-BASED PULL)
+
+PART 1: Vault Identity Handshake & Coalesced Ledger Swap
+--------------------------------------------------------
+1. Vault-Level Guard:
+   - Bob (Client) initiates sync by sending `[S1000] SYNCO` carrying his 32-byte 
+     `VAULT_ID` (`SHA3-256(b"MONOLOG_VAULT_ID:" + DEK)`).
+   - Alice compares Bob's `VAULT_ID` against her active Vault's `VAULT_ID`.
+   - If they match, Alice replies `[V2000] ACQ_OK` carrying her `VAULT_ID`[cite: 3, 11].
+   - If they DO NOT match (the user opened the wrong `.scaf` file), Alice sends 
+     `[X1000] BYE_FORCE` and aborts before any ledger or chunk data is exchanged.
+2. Unsynced Ledger Swap:
+   - Both nodes call `ledger.get_unsynced_payload()`, which coalesces multiple 
+     unsynced local actions per UUID via `_action_manager` (e.g., `INGEST` + 
+     `RENAME` coalesces to `INGEST` at the newer timestamp)[cite: 11, 12] and immediately 
+     flushes to `.sync.enc` on disk (`_flush()`).
+   - Both nodes exchange `[S2000] SYNC_LDG`:
+     `{ 16_byte_uuid : [ highest_unsynced_v_ts, coalesced_action_id ] }`[cite: 11, 12]
+
+PART 2: Turn-Based Audit & Pull Execution
+-----------------------------------------
+Syncing is strictly turn-based to prevent socket race conditions[cite: 3, 11]:
+  - TURN 1: Client (Bob) runs `_auditor()` and `_fetcher()` while Server (Alice) 
+    runs `_serve_peer_requests()`[cite: 3, 11].
+  - HANDOVER: When Bob finishes pulling all items in his `pull_list`, Bob sends 
+    `[S3000] SYNC_NUL`[cite: 3, 11].
+  - TURN 2: Server (Alice) exits `_serve_peer_requests()`, runs her own `_auditor()` 
+    and `_fetcher()`, while Client (Bob) enters `_serve_peer_requests()`[cite: 3, 11].
+  - TEARDOWN: Alice sends `[S3000] SYNC_NUL`, followed by `[X0000] BYE_GRACE`[cite: 3, 11].
+
+For each UUID in the peer's unsynced payload, the active puller compares 
+`peer_v_ts` against its local `l_v_ts` (with Server winning exact timestamp ties)[cite: 3, 11]:
+
+  * CASE 1: Action == DELETE (0)
+    No network pull is issued[cite: 3, 11]. If the file is active locally, the puller pushes 
+    `LocalOpcodes.NET_DEL` and `LocalOpcodes.LOCAL_MARK_SYNC` to `TaSkewer`[cite: 3, 10, 11].
+
+  * CASE 2: Action == RENAME (1), EDIT (2), or INGEST (3)
+    The puller checks if `uuid` currently exists in `vaultdb.get_active_files()`[cite: 9].
+    - If active locally: `force_full = b"\x00"`
+    - If missing/deleted locally: `force_full = b"\x01"`
+    The puller sends `[V1000] SYNC_REQ` with the 17-byte payload `uuid + force_full`:
+    1. Lightweight Rename (`action == RENAME` and `force_full == b"\x00"`):
+       Responder sends `[V3000] VAULT_META` with `{"type": "rename", "v_path": ...}`[cite: 3, 11].
+       Puller pushes `LocalOpcodes.NET_META` to `TaSkewer` and replies `[V2000] ACQ_OK`[cite: 3, 10, 11].
+    2. Full Cargo Stream (`INGEST`, `EDIT`, or `RENAME` with `force_full == b"\x01"`):
+       Responder normalizes chunk offsets from `VaultMap` to zero-based offsets and 
+       sends `[V3000] VAULT_META` (`{"type": "data_header", "v_path", "created_at", 
+       "total_chunks", "hashmap"}`)[cite: 3, 7, 11].
+       Puller replies `[V2000] ACQ_OK`[cite: 3, 11]. Responder streams each encrypted chunk via 
+       `[V4000] VAULT_DATA`, waiting for `[V2000] ACQ_OK` after every chunk[cite: 3, 11].
+       Puller writes chunks to a temporary file and dispatches `LocalOpcodes.NET_DATA` 
+       and `LocalOpcodes.LOCAL_MARK_SYNC` to `TaSkewer`[cite: 3, 10, 11].
+
+=============================================================================
+SECTION 4: CONFLICT RESOLUTION (LOCAL BRANCHING)
+
+If `peer_v_ts > local_v_ts` (or `==` when peer is Server) AND `uuid` is also 
+present in the puller's own unsynced payload (`is_conflict = True`)[cite: 3, 11]:
+1. Before overwriting the local version, `ingest_network_payload` preserves the 
+   local unsynced edit by minting a new UUIDv7 (`IDGenerator.generate_file_id()`)[cite: 6].
+2. The local conflicted file's existing chunk pointers in `VaultMap` are bound to 
+   the new UUID under a conflict filename generated via `VaultDatabase.assign_name()` 
+   (`"filename (1).ext"`, `"filename (2).ext"`)[cite: 6, 7, 9], and logged as `ACTION_INGEST`[cite: 6].
+3. The incoming winning version from the peer is then written to the original UUID[cite: 6].
+
+=============================================================================
+SECTION 5: FUTURE ARCHITECTURE ROADMAP (v4.0 MULTI-PEER STATE COMPACTION)
+*(Scheduled for Post-MVP Expansion to N > 2 Devices)*
+
+To transition MonoLog from a strict 1-to-1 replica pair to an N-device mesh 
+(Devices A, B, C...) without ledger bloat or per-device sync columns:
+
+1. State-Compacted SyncLedger Schema:
+   Replace the append-only `[uuid, v_ts, action, sync_time]` list with a 
+   compacted dictionary storing at most ONE record per UUID:
+   `{ 16_byte_uuid : [ meta_v_ts, data_v_ts, is_deleted_bool ] }`
+   - `INGEST` / `EDIT` updates both `meta_v_ts` and `data_v_ts` to `now`.
+   - `RENAME` updates ONLY `meta_v_ts` to `now` (preserving `data_v_ts`).
+   - `DELETE` updates `meta_v_ts` to `now` and sets `is_deleted_bool = True`.
+
+2. Recipient-Driven Action Derivation (Eliminating Action Ambiguity):
+   When any two peers swap compacted ledgers, the recipient compares its local 
+   `[l_meta_ts, l_data_ts, l_del]` against the peer's `[p_meta_ts, p_data_ts, p_del]`:
+   - If `p_del == True` and `p_meta_ts > l_meta_ts` -> Execute Local Delete (`NET_DEL`).
+   - If `p_del == False` and (`p_data_ts > l_data_ts` or file not active locally) 
+     -> Request Full File Chunks + Metadata (`NET_DATA`).
+   - If `p_del == False` and `p_data_ts == l_data_ts` and `p_meta_ts > l_meta_ts` 
+     -> Request Lightweight Rename Only (`NET_META`).
+
+3. Passive mDNS Delta Beacons:
+   Include `LEDGER-HASH` (the SHA3-256 digest of the compacted ledger) in the 
+   mDNS TXT broadcast. Online peers on the LAN compare `LEDGER-HASH` passively 
+   and only initiate a TCP sync session when a divergence is detected.
+=============================================================================

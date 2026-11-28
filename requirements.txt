@@ -6,3 +6,4 @@ zeroconf
 qrcode
 keyring
 uuid6
+tqdm
